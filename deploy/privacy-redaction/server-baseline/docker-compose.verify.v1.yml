@@ -1,0 +1,40 @@
+# 受控回显上游 —— 只在验收阶段 1 追加这一份 -f 启动，常态不运行。
+#
+# compose v1 不支持 profiles:，所以 echo 单独成文件，用「是否追加 -f」代替 profile 开关。
+#
+# 用法：
+#   docker-compose -f docker-compose.yml \
+#     -f privacy-redaction/server-baseline/docker-compose.redaction.v1.yml \
+#     -f privacy-redaction/server-baseline/docker-compose.verify.v1.yml up -d echo
+#
+# 阶段 1 结束后：... stop echo && ... rm -f echo
+
+version: "3.8"
+
+services:
+  echo:
+    build:
+      context: ./privacy-redaction/echo
+      dockerfile: Dockerfile
+    image: axonhub-redact-echo:local
+    container_name: axonhub-redact-echo
+    environment:
+      PORT: "8080"
+    networks:
+      - axonhub-network
+    init: true
+    read_only: true
+    tmpfs:
+      - "/tmp:rw,noexec,nosuid,size=16m,mode=1777"
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    restart: "no"
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+    mem_limit: 256m
+    pids_limit: 128

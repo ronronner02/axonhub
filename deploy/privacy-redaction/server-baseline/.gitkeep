@@ -1,0 +1,5 @@
+# 服务器变更前快照（去密）
+#
+# 由 owner 在 U6 阶段 0 把服务器上的 docker-compose.yml 与 nginx.conf 去密后复制到本目录。
+# 去密要求：删除任何口令、DSN、真实第三方主机名、Cloudflare / 隧道相关标识。
+# .env 永不入库。
