@@ -1,25 +1,22 @@
 # 出站隐私脱敏层 overlay（CRG sidecar）
 #
-# 服务器上叠加到现有 compose 使用（该机为 docker-compose v1.29.2，注意是连字符命令）：
+# compose v2 用法（本地冒烟 / v2 服务器）：
 #   cd /srv/apps/axonhub
-#   docker-compose -f docker-compose.yml -f privacy-redaction/docker-compose.redaction.yml config
-#   docker-compose -f docker-compose.yml -f privacy-redaction/docker-compose.redaction.yml up -d redact
+#   docker compose -f docker-compose.yml -f privacy-redaction/docker-compose.redaction.yml config
+#   docker compose -f docker-compose.yml -f privacy-redaction/docker-compose.redaction.yml up -d redact
 #
 # 设计约束：
 #   - redact 不发布任何端口，只在 axonhub 所在的内部网络可达（R-07）。
 #   - REDACT_ALLOWED_HOSTS 用 ${VAR:?} 强制非空，避免 CRG 退化成开放代理。
 #   - echo 只在 profile `verify` 下启动，常态不运行。
 #
-# compose v1 兼容性（已在目标服务器实测）：
-#   - 资源上限用 mem_limit / pids_limit，不用 deploy.resources（v1 非 swarm 下会被忽略）。
-#   - 网络沿用上层 docker-compose.yml 声明的 axonhub-network，本文件不再重复声明。
+# compose v1 专用变体见 server-baseline/docker-compose.redaction.v1.yml；本文件面向 compose v2。
 
-version: "2.4"
 
 services:
   redact:
     build:
-      context: ./privacy-redaction/crg
+      context: ./crg
       dockerfile: Dockerfile
     image: ${REDACT_IMAGE:-axonhub-redact:local}
     container_name: ${REDACT_CONTAINER_NAME:-axonhub-redact}

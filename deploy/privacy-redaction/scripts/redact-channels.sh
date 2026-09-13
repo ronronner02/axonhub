@@ -60,6 +60,7 @@ usage() {
   skip-protected   已加前缀，幂等跳过
   skip-exempt      带豁免 tag，永不改写（即使 --only 指定）
   skip-archived    已归档
+  skip-deleted     ent 软删除行（GraphQL 不可见，仅 psql 导出会出现）
   restore          去掉封套前缀（仅 --restore）
   error-empty-url  base_url 为空，需先写显式 URL
   error-websocket  ws:// / wss:// 无法经脱敏层
@@ -83,6 +84,11 @@ done
 die() { printf '错误: %s\n' "$1" >&2; exit 2; }
 
 # ── node 求值器（与 check-trust-boundary.sh 相同策略）──────────────────────────
+# 目标服务器只有 docker、没有 node。所有 JS 片段都必须经由同一个分派器，
+# 不允许在脚本任何位置直接调用裸的 node 可执行文件。
+
+# 容器内 node 需要显式透传的环境变量（内联 JS 片段读取的全部键）。
+NODE_ENV_KEYS=(CHANNELS_JSON PREFIX EXEMPT_TAG RESTORE_IDS ONLY_IDS EMAIL PASS AFTER Q V ACC RESP P I X R)
 
 pick_node_runner() {
   if command -v node >/dev/null 2>&1; then echo host
@@ -91,16 +97,27 @@ pick_node_runner() {
   else echo none; fi
 }
 
-run_node() {
-  case "$1" in
-    host) node --input-type=module - ;;
-    image) docker run --rm -i -e CHANNELS_JSON -e PREFIX -e EXEMPT_TAG -e RESTORE_IDS -e ONLY_IDS \
-             "${REDACT_IMAGE:-axonhub-redact:local}" node --input-type=module - ;;
-    container) docker exec -i -e CHANNELS_JSON -e PREFIX -e EXEMPT_TAG -e RESTORE_IDS -e ONLY_IDS \
-             "${REDACT_CONTAINER:-axonhub-redact}" node --input-type=module - ;;
-    *) die "找不到可用的 JSON 求值器（需要宿主机 node，或 redact 镜像/容器）" ;;
+NODE_RUNNER="$(pick_node_runner)"
+[[ "$NODE_RUNNER" != "none" ]] || die "找不到可用的 JSON 求值器（需要宿主机 node，或 redact 镜像/容器）"
+
+# 组装容器分派前缀。--network host 让容器内的 curl 之外的逻辑不受影响；
+# 这里的 node 只做 JSON 变换，不发网络请求，网络由宿主 curl 负责。
+_node_prefix() {
+  local envflags=()
+  local k
+  for k in "${NODE_ENV_KEYS[@]}"; do envflags+=(-e "$k"); done
+  case "$NODE_RUNNER" in
+    host)      printf '%s\n' node ;;
+    image)     printf '%s\n' docker run --rm -i "${envflags[@]}" "${REDACT_IMAGE:-axonhub-redact:local}" node ;;
+    container) printf '%s\n' docker exec -i "${envflags[@]}" "${REDACT_CONTAINER:-axonhub-redact}" node ;;
   esac
 }
+mapfile -t NODE_CMD < <(_node_prefix)
+
+# js '<script>'      —— 等价 node -e '<script>'，环境变量按 NODE_ENV_KEYS 透传
+# js_module          —— 等价 node --input-type=module -，脚本从 stdin 读
+js()        { "${NODE_CMD[@]}" -e "$1"; }
+js_module() { "${NODE_CMD[@]}" --input-type=module -; }
 
 # ── 网络层 ────────────────────────────────────────────────────────────────────
 
@@ -120,11 +137,11 @@ get_token() {
     || die "需要 AXONHUB_EMAIL 与 AXONHUB_PASSWORD（或直接给 AXONHUB_TOKEN）"
   command -v curl >/dev/null 2>&1 || die "需要 curl"
   local body resp
-  body="$(EMAIL="$AXONHUB_EMAIL" PASS="$AXONHUB_PASSWORD" node -e \
+  body="$(EMAIL="$AXONHUB_EMAIL" PASS="$AXONHUB_PASSWORD" js \
     'process.stdout.write(JSON.stringify({email:process.env.EMAIL,password:process.env.PASS}))' 2>/dev/null)" \
-    || die "构造登录请求失败（需要宿主机 node）"
+    || die "构造登录请求失败（JSON 求值器不可用）"
   resp="$(http_json POST "${ADMIN_URL}/admin/auth/signin" "$body" "")" || die "signin 请求失败"
-  printf '%s' "$resp" | node -e \
+  printf '%s' "$resp" | js \
     'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{const j=JSON.parse(s);if(!j.token)throw 0;process.stdout.write(j.token)}catch{process.stderr.write("signin 未返回 token: "+s.slice(0,200)+"\n");process.exit(2)}})' \
     || exit 2
 }
@@ -135,11 +152,11 @@ fetch_channels_gql() {
   local acc="[]"
   while :; do
     local vars body
-    vars="$(AFTER="$after" node -e 'const a=process.env.AFTER;process.stdout.write(JSON.stringify({after:a==="null"?null:a}))')"
-    body="$(Q="$q" V="$vars" node -e 'process.stdout.write(JSON.stringify({query:process.env.Q,variables:JSON.parse(process.env.V)}))')"
+    vars="$(AFTER="$after" js 'const a=process.env.AFTER;process.stdout.write(JSON.stringify({after:a==="null"?null:a}))')"
+    body="$(Q="$q" V="$vars" js 'process.stdout.write(JSON.stringify({query:process.env.Q,variables:JSON.parse(process.env.V)}))')"
     resp="$(http_json POST "${ADMIN_URL}/admin/graphql" "$body" "$token")" || die "channels 查询失败"
     local page
-    page="$(ACC="$acc" RESP="$resp" node -e '
+    page="$(ACC="$acc" RESP="$resp" js '
 let r;try{r=JSON.parse(process.env.RESP)}catch{console.error("GraphQL 响应非 JSON");process.exit(2)}
 if(r.errors){console.error("GraphQL 错误: "+JSON.stringify(r.errors).slice(0,300));process.exit(2)}
 const c=r.data&&r.data.channels;if(!c){console.error("响应缺少 channels");process.exit(2)}
@@ -147,10 +164,10 @@ const acc=JSON.parse(process.env.ACC);
 for(const e of (c.edges||[])) if(e&&e.node) acc.push(e.node);
 process.stdout.write(JSON.stringify({acc,hasNext:!!(c.pageInfo&&c.pageInfo.hasNextPage),cursor:(c.pageInfo&&c.pageInfo.endCursor)||null}));
 ')" || exit 2
-    acc="$(ACC="$page" node -e 'let s=process.env.ACC;process.stdout.write(JSON.stringify(JSON.parse(s).acc))')"
+    acc="$(ACC="$page" js 'let s=process.env.ACC;process.stdout.write(JSON.stringify(JSON.parse(s).acc))')"
     local hasNext cursor
-    hasNext="$(P="$page" node -e 'process.stdout.write(String(JSON.parse(process.env.P).hasNext))')"
-    cursor="$(P="$page" node -e 'const c=JSON.parse(process.env.P).cursor;process.stdout.write(c===null?"null":String(c))')"
+    hasNext="$(P="$page" js 'process.stdout.write(String(JSON.parse(process.env.P).hasNext))')"
+    cursor="$(P="$page" js 'const c=JSON.parse(process.env.P).cursor;process.stdout.write(c===null?"null":String(c))')"
     [[ "$hasNext" == "true" ]] || break
     after="$cursor"
   done
@@ -170,15 +187,13 @@ else
 fi
 [[ -n "$CHANNELS_JSON" ]] || die "渠道数据为空"
 
-RUNNER="$(pick_node_runner)"
-[[ "$RUNNER" != "none" ]] || die "找不到可用的 JSON 求值器"
 
 export CHANNELS_JSON PREFIX EXEMPT_TAG RESTORE_IDS ONLY_IDS
 
 # ── 计划层 ────────────────────────────────────────────────────────────────────
 # 输出人类可读计划到 stderr，机器可读动作（JSON 行）到 stdout。
 
-PLAN="$(run_node "$RUNNER" <<'JS'
+PLAN="$(js_module <<'JS'
 const PREFIX = process.env.PREFIX, EXEMPT_TAG = process.env.EXEMPT_TAG;
 const restoreIds = new Set(String(process.env.RESTORE_IDS || "").split(",").map(s=>s.trim()).filter(Boolean));
 const onlyIds = new Set(String(process.env.ONLY_IDS || "").split(",").map(s=>s.trim()).filter(Boolean));
@@ -229,6 +244,8 @@ for (const c of channels) {
   if (isRestore && !restoreIds.has(id)) continue;
 
   if (status === "archived") { add("skip-archived", "已归档"); continue; }
+  const deletedAt = pick(c, "deleted_at", "deletedAt");
+  if (deletedAt != null && Number(deletedAt) !== 0) { add("skip-deleted", "ent 软删除（GraphQL 不可见）"); continue; }
   if (!isRestore && tags.includes(EXEMPT_TAG)) { add("skip-exempt", `带 ${EXEMPT_TAG} tag，永不改写`); continue; }
   if (urls.some((u) => /^wss?:\/\//i.test(u))) { add("error-websocket", "ws:// / wss:// 无法经脱敏层"); continue; }
   if (!base) { add("error-empty-url", "base_url 为空，需先在控制台写显式 URL"); continue; }
@@ -262,7 +279,7 @@ for (const c of channels) {
 
 // 人类可读计划 -> stderr
 const w = (s) => process.stderr.write(s + "\n");
-const order = ["rewrite","restore","skip-protected","skip-exempt","skip-archived","error-empty-url","error-websocket","error-not-prefixed"];
+const order = ["rewrite","restore","skip-protected","skip-exempt","skip-archived","skip-deleted","error-empty-url","error-websocket","error-not-prefixed"];
 w("");
 w(isRestore ? "回滚计划" : "改写计划");
 w("");
@@ -281,8 +298,8 @@ process.stdout.write(JSON.stringify({ actions, errCount, isRestore }));
 JS
 )" || exit 2
 
-ERR_COUNT="$(P="$PLAN" node -e 'process.stdout.write(String(JSON.parse(process.env.P).errCount))' 2>/dev/null || echo 0)"
-ACTION_COUNT="$(P="$PLAN" node -e 'process.stdout.write(String(JSON.parse(process.env.P).actions.length))' 2>/dev/null || echo 0)"
+ERR_COUNT="$(P="$PLAN" js 'process.stdout.write(String(JSON.parse(process.env.P).errCount))' 2>/dev/null || echo 0)"
+ACTION_COUNT="$(P="$PLAN" js 'process.stdout.write(String(JSON.parse(process.env.P).actions.length))' 2>/dev/null || echo 0)"
 
 # ── 执行门禁 ──────────────────────────────────────────────────────────────────
 
@@ -309,12 +326,12 @@ fi
 printf '\n开始执行 %s 条更新...\n' "$ACTION_COUNT" >&2
 FAILED=0
 for i in $(seq 0 $((ACTION_COUNT - 1))); do
-  ITEM="$(P="$PLAN" I="$i" node -e 'process.stdout.write(JSON.stringify(JSON.parse(process.env.P).actions[Number(process.env.I)]))')"
-  CID="$(X="$ITEM" node -e 'process.stdout.write(String(JSON.parse(process.env.X).id))')"
-  CNAME="$(X="$ITEM" node -e 'process.stdout.write(String(JSON.parse(process.env.X).name))')"
-  OLDB="$(X="$ITEM" node -e 'process.stdout.write(String(JSON.parse(process.env.X).oldBase))')"
-  NEWB="$(X="$ITEM" node -e 'process.stdout.write(String(JSON.parse(process.env.X).newBase))')"
-  BODY="$(X="$ITEM" node -e '
+  ITEM="$(P="$PLAN" I="$i" js 'process.stdout.write(JSON.stringify(JSON.parse(process.env.P).actions[Number(process.env.I)]))')"
+  CID="$(X="$ITEM" js 'process.stdout.write(String(JSON.parse(process.env.X).id))')"
+  CNAME="$(X="$ITEM" js 'process.stdout.write(String(JSON.parse(process.env.X).name))')"
+  OLDB="$(X="$ITEM" js 'process.stdout.write(String(JSON.parse(process.env.X).oldBase))')"
+  NEWB="$(X="$ITEM" js 'process.stdout.write(String(JSON.parse(process.env.X).newBase))')"
+  BODY="$(X="$ITEM" js '
 const a = JSON.parse(process.env.X);
 const input = { baseURL: a.newBase };
 const eps = (a.newEps || []).filter(e => e && e.apiFormat);
@@ -324,7 +341,7 @@ process.stdout.write(JSON.stringify({
   variables: { id: a.gid, input }
 }));')"
   RESP="$(http_json POST "${ADMIN_URL}/admin/graphql" "$BODY" "$TOKEN")" || { printf '  #%s %s 请求失败\n' "$CID" "$CNAME" >&2; FAILED=$((FAILED+1)); continue; }
-  if R="$RESP" node -e 'const r=JSON.parse(process.env.R);process.exit(r.errors?1:0)' 2>/dev/null; then
+  if R="$RESP" js 'const r=JSON.parse(process.env.R);process.exit(r.errors?1:0)' 2>/dev/null; then
     printf '  #%s %s\n    %s\n    -> %s\n' "$CID" "$CNAME" "$OLDB" "$NEWB" >&2
   else
     printf '  #%s %s 失败: %s\n' "$CID" "$CNAME" "$(printf '%s' "$RESP" | head -c 200)" >&2

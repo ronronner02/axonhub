@@ -28,6 +28,7 @@ REDACT_CONTAINER="${REDACT_CONTAINER:-axonhub-redact}"
 
 CHANNELS_FILE=""
 ALLOWED_HOSTS=""
+ALLOWED_HOSTS_SET=0
 SKIP_HOST_CHECK=0
 
 usage() {
@@ -55,7 +56,7 @@ EOF
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --channels-file) CHANNELS_FILE="${2:-}"; shift 2 ;;
-    --allowed-hosts) ALLOWED_HOSTS="${2:-}"; SKIP_HOST_CHECK=0; shift 2 ;;
+    --allowed-hosts) ALLOWED_HOSTS="${2:-}"; ALLOWED_HOSTS_SET=1; SKIP_HOST_CHECK=0; shift 2 ;;
     --skip-host-check) SKIP_HOST_CHECK=1; shift ;;
     -h|--help) usage; exit 0 ;;
     *) echo "未知参数: $1" >&2; usage >&2; exit 2 ;;
@@ -120,7 +121,8 @@ fetch_channels() {
 }
 
 fetch_allowed_hosts() {
-  if [[ -n "$ALLOWED_HOSTS" ]]; then printf '%s' "$ALLOWED_HOSTS"; return; fi
+  # 显式传了 --allowed-hosts（哪怕是空串）就用它；空集合本身就是要断言的开放代理条件。
+  if [[ "$ALLOWED_HOSTS_SET" == "1" ]]; then printf '%s' "$ALLOWED_HOSTS"; return; fi
   command -v docker >/dev/null 2>&1 || die "需要 docker 读取容器环境，或改用 --allowed-hosts"
   docker inspect "$REDACT_CONTAINER" \
     --format '{{range .Config.Env}}{{println .}}{{end}}' 2>/dev/null \
@@ -166,10 +168,12 @@ const endpointsOf = (c) => {
   return Array.isArray(e) ? e : [];
 };
 // 一条渠道涉及的全部出站 URL：base_url 加上非空的 endpoints[].base_url
+const pick = (o, ...ks) => { for (const k of ks) if (o && o[k] != null) return o[k]; return undefined; };
+// 同时接受 psql 导出（base_url）与 GraphQL（baseURL）两种字段名。
 const urlsOf = (c) => {
-  const out = [{ label: "base_url", url: norm(c.base_url) }];
+  const out = [{ label: "base_url", url: norm(pick(c, "base_url", "baseURL")) }];
   endpointsOf(c).forEach((ep, i) => {
-    const u = norm(ep && ep.base_url);
+    const u = norm(pick(ep, "base_url", "baseURL"));
     if (u) out.push({ label: `endpoints[${i}].base_url`, url: u });
   });
   return out;
@@ -186,6 +190,9 @@ const expectedHosts = new Set();
 for (const c of channels) {
   const id = c.id, name = c.name, status = norm(c.status);
   if (status === "archived") continue;               // 归档渠道不参与判定
+  // ent 软删除（deleted_at<>0）：GraphQL/控制台/路由都看不到，同归档处理。
+  // psql 层已过滤，这里再过滤一次是为了让 --channels-file 离线输入也一致。
+  if (c.deleted_at != null && Number(c.deleted_at) !== 0) continue;
   const tags = tagsOf(c);
   const isExemptTagged = tags.includes(EXEMPT_TAG);
   const urls = urlsOf(c);

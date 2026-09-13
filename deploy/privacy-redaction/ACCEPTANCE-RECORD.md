@@ -16,14 +16,14 @@ axonhub 版本：`v1.0.0-beta7`
 | AE-01 | R-01、R-03 出站脱敏与同值同占位符 | 1 | 通过 | 2026-09-12 | docker logs axonhub-redact-echo；本会话记录 | 生产 redact + echo；4 类原值零出现，5 占位符/4 唯一，重复密钥同占位符 |
 | AE-02 | R-02、R-09 回程还原（非流式） | 2 | 通过 | 2026-09-13 | requests#6568 ch10 completed 2872ms | claude-opus-5-max 非流式复述伪造密钥，客户端得到原值、无占位符（昨日 429 为上游额度，今日重置后通过） |
 | AE-03 | R-02、R-10 流式跨块还原 | 2 | 通过 | 2026-09-12 | requests#6563 ch27 completed stream；客户端得到完整原值，流中无占位符 | ch27 claude-sonnet-5；首块 2109ms/总 2775ms |
-| AE-04 | R-06 脱敏层停止时 fail-closed 与转移 | 4 | 通过 | 2026-09-13 | requests#6600(gpt-5.6-sol→#26 成功,转移链 #14 dial失败×2→switches=2)、#6605(claude-opus-5-max 仅#10→500 dial tcp lookup redact 失败,switches=0,same_channel_retries=2)；#6602/6603 为 owner 真实流量在停机窗口内失败 | 停 redact 01:44:52–01:45:15 与 01:45:45–01:45:54 UTC。受保护渠道对 redact 的连接失败被记为传输错误(非 HTTP 状态码)；有豁免候选时转移到 #26 明文成功(BR-001 允许)，无豁免候选时客户端收到 500 且零明文外发；auto_disabled_at 全程为空(自动禁用未配置) |
+| AE-04 | R-06 脱敏层停止时 fail-closed 与转移 | 4 | 通过 | 2026-09-13 | requests#6600(gpt-5.6-sol→#26 成功,转移链 #14 dial失败×2→switches=2)、#6605(claude-opus-5-max 仅#10→500 dial tcp lookup redact 失败,switches=0,same_channel_retries=2)；#6602/6603 为本会话在停机窗口内发出的流式探测（source=api，与其它探测同源 IP），非 owner 真实流量 | 停 redact 01:44:52–01:45:15 与 01:45:45–01:45:54 UTC。受保护渠道对 redact 的连接失败被记为传输错误(非 HTTP 状态码)；有豁免候选时转移到 #26 明文成功(BR-001 允许)，无豁免候选时客户端收到 500 且零明文外发；auto_disabled_at 全程为空(自动禁用未配置) |
 | AE-05 | R-06 非 JSON 正文被拒绝 | 1 | 通过 | 2026-09-12 | echo 无新增记录；CRG 415 | multipart 被 415 拒绝且未转发 |
 | AE-06 | R-07 上游主机白名单 | 1 | 通过 | 2026-09-12 | CRG 403；echo 无新增 | not-allowed.internal 与 api.anthropic.com 均 403 |
 | AE-07 | R-04、R-05 信任边界核对 | 3 | 通过 | 2026-09-13 | check-trust-boundary.sh 终态 EXIT=0；本会话记录 | 受保护 23、豁免仅 #26、违规 0、允许主机集合与渠道推导集合一致（8 主机）；#20/#24 为 ent 软删除（deleted_at<>0，GraphQL 不可见）与 #23 归档均不参与 |
 | AE-08 | R-08 凭据头转发与身份头清理 | 1 | 通过 | 2026-09-12 | echo 记录头 | x-api-key/anthropic-* 转发；x-forwarded-for/x-real-ip/cf-connecting-ip/cookie 移除 |
 | AE-09 | R-10 客户端零改动含工具调用流式会话 | 2 | 通过 | 2026-09-13 | requests#6569(stream tool_use)/#6570(tool_result 回传) | get_secret_len 工具名一致、参数中密钥还原为原值、流中无占位符、第二轮 200 |
 | AE-10 | R-03 助记词为已声明边界（应原样外发） | 1 | 通过 | 2026-09-12 | echo 记录正文 | 12 词助记词原样外发（BR-002 口径一致） |
-| AE-11 | BR-004 模型改写占位符原样透传 | 4 | 通过 | 2026-09-13 | requests#6571 ch10 completed；单行无重试 | 要求只输出前 12 字符：模型 thinking 明示看到的是 redacted 占位符并未复述原值；200 无重试无报错（BR-004 透传语义成立） |
+| AE-11 | BR-004 模型改写占位符原样透传 | 2 | 通过 | 2026-09-13 | requests#6571 ch10 completed；单行无重试 | 要求只输出前 12 字符：模型 thinking 明示看到的是 redacted 占位符并未复述原值；200 无重试无报错（BR-004 透传语义成立） |
 
 P0 相关项（AE-01～AE-06、AE-08～AE-10）必须全部通过才算验收完成。
 

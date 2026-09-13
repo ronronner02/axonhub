@@ -114,6 +114,20 @@ if [[ "$rc" == 0 ]]; then ok "--help exit=0"; else bad "--help 应 exit=0，实�
 has "skip-exempt"
 has "退出码: 0 成功"
 
+
+printf '
+[1m11. 生产形状回归（线上才发现的两个缺陷）[0m
+'
+run 0 "GraphQL gid:// id：--only 10 能命中" --plan-from-file "${FIX}/channels-gql-shape.json" --only 10
+has "rewrite (1)"
+has "#10 sotamodel"
+run 0 "GraphQL gid:// id：豁免/已保护分类不受 id 形态影响" --plan-from-file "${FIX}/channels-gql-shape.json"
+has "skip-exempt (1)"
+has "skip-protected (1)"
+run 0 "psql 导出含 deleted_at<>0 -> skip-deleted，不进入 rewrite" --plan-from-file "${FIX}/channels-psql-softdeleted.json"
+has "skip-deleted (1)"
+has "#20 ghost"
+has "待写 0 条"
 printf '\n\033[1m汇总\033[0m\n  PASS %d    FAIL %d\n' "$PASS" "$FAIL"
 [[ "$FAIL" -eq 0 ]] || { printf '\n\033[31m测试未通过\033[0m\n'; exit 1; }
 printf '\n\033[32m全部通过\033[0m\n'

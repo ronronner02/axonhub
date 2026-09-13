@@ -13,6 +13,7 @@
 
 ## 目录
 
+0. [先确认 compose 版本](#0-先确认-compose-版本决定后面每条命令的写法)
 1. [前置](#1-前置)
 2. [部署](#2-部署)
 3. [阶段 1：回显验证](#3-阶段-1回显验证)
@@ -27,6 +28,25 @@
 任一阶段失败就停在该阶段，不进入下一阶段，**不得为了让验收通过而把受保护渠道回退为直连**（BR-005）。
 
 ---
+
+## 0. 先确认 compose 版本（决定后面每条命令的写法）
+
+```bash
+docker compose version 2>/dev/null && echo "v2" || docker-compose --version
+```
+
+| 你的环境 | 用哪份 overlay | 命令前缀（下文记作 `$DC`） |
+| --- | --- | --- |
+| `docker compose` v2（开发机常见） | `docker-compose.redaction.yml`（含 `profiles: [verify]`） | `docker compose -f docker-compose.yml -f privacy-redaction/docker-compose.redaction.yml` |
+| `docker-compose` v1.29.x（**本项目目标服务器**） | `server-baseline/docker-compose.redaction.v1.yml` + 验证时追加 `docker-compose.verify.v1.yml` | `docker-compose -f docker-compose.yml -f privacy-redaction/server-baseline/docker-compose.redaction.v1.yml` |
+
+v1 与 v2 的三处不兼容已在 v1 版 overlay 里处理：v1 不支持 `profiles:`（echo 拆成单独文件，用「是否追加 `-f`」代替）；
+v1 静默忽略 `deploy.resources`（改用 `mem_limit` / `pids_limit`）；v1 以第一个 `-f` 所在目录解析相对路径（build context 写成 `./privacy-redaction/crg`）。
+
+**下文所有服务器命令按 v1 写法给出**（这是实际验收时跑通的那套）。v2 用户把前缀换成上表第一行即可。
+
+**v1 已知坑：** `--force-recreate` 对 BuildKit 构建的镜像会报 `KeyError: 'ContainerConfig'`。重建 `redact` 一律用
+`docker rm -f axonhub-redact && $DC up -d redact`，不要用 `--force-recreate`。
 
 ## 1. 前置
 
@@ -101,13 +121,13 @@ overlay 默认假设 axonhub 所在网络的 YAML 键名是 `axonhub-network`。
 
 ```bash
 cd /srv/apps/axonhub
-docker compose -f docker-compose.yml -f privacy-redaction/docker-compose.redaction.yml config
+docker-compose -f docker-compose.yml -f privacy-redaction/server-baseline/docker-compose.redaction.v1.yml config
 ```
 
 - 渲染成功且 `redact` 与 `axonhub` 在同一网络 → 继续。
-- 报网络定义冲突（服务器 compose 已用同名键非 external 声明该网络）→
-  删除 `privacy-redaction/docker-compose.redaction.yml` 末尾的整个 `networks:` 块，
-  让 overlay 复用上层声明，再重新 `config`。
+- v1 overlay 已不再声明 `networks:` 块，直接复用上层 `docker-compose.yml` 的 `axonhub-network`
+  （目标服务器实测：键名 `axonhub-network`，实际网络名 `axonhub_axonhub-network`）。
+  若你的服务器键名不同，改 v1 overlay 里两处 `services.*.networks` 即可。
 - 网络键名不同 → 把 overlay 中 `services.redact.networks`、`services.echo.networks`
   与 `networks:` 块的键名一并改成实际键名。
 
@@ -116,11 +136,9 @@ docker compose -f docker-compose.yml -f privacy-redaction/docker-compose.redacti
 ### 2.2 启动脱敏层
 
 ```bash
-docker compose -f docker-compose.yml -f privacy-redaction/docker-compose.redaction.yml \
-  up -d --build redact
-
-docker compose -f docker-compose.yml -f privacy-redaction/docker-compose.redaction.yml \
-  ps redact          # 期望 healthy
+docker-compose -f docker-compose.yml -f privacy-redaction/server-baseline/docker-compose.redaction.v1.yml build redact
+docker-compose -f docker-compose.yml -f privacy-redaction/server-baseline/docker-compose.redaction.v1.yml up -d redact
+docker inspect -f '{{.State.Health.Status}}' axonhub-redact    # 期望 healthy
 ```
 
 此时**尚未改任何渠道**，流量行为与之前完全一致。
@@ -144,8 +162,8 @@ docker port axonhub-redact          # 期望无输出
 
 ```bash
 cd /srv/apps/axonhub
-docker compose -f docker-compose.yml -f privacy-redaction/docker-compose.redaction.yml \
-  --profile verify up -d --build echo
+docker-compose -f docker-compose.yml -f privacy-redaction/server-baseline/docker-compose.redaction.v1.yml -f privacy-redaction/server-baseline/docker-compose.verify.v1.yml build echo
+docker-compose -f docker-compose.yml -f privacy-redaction/server-baseline/docker-compose.redaction.v1.yml -f privacy-redaction/server-baseline/docker-compose.verify.v1.yml up -d echo
 ```
 
 ### 3.2 建一条常态禁用的测试渠道
@@ -194,8 +212,7 @@ docker logs axonhub-redact-echo --tail 5
 全部通过后**禁用测试渠道**，并把 `echo` 停掉：
 
 ```bash
-docker compose -f docker-compose.yml -f privacy-redaction/docker-compose.redaction.yml \
-  --profile verify stop echo
+docker rm -f axonhub-redact-echo
 ```
 
 ---
@@ -208,7 +225,8 @@ docker compose -f docker-compose.yml -f privacy-redaction/docker-compose.redacti
 
 ```bash
 cd /srv/apps/axonhub/privacy-redaction
-export AXONHUB_ADMIN_URL=http://127.0.0.1:8090
+# axonhub 容器不发布 8090；管理端经 nginx 走 127.0.0.1:8020（/admin/auth/signin 有 5r/m 限流）
+export AXONHUB_ADMIN_URL=http://127.0.0.1:8020
 export AXONHUB_EMAIL=<管理员邮箱>
 export AXONHUB_PASSWORD=<口令>
 
@@ -244,8 +262,23 @@ bash scripts/redact-channels.sh --only <渠道id> --apply
 
 ### 5.1 先给官方渠道打豁免 tag
 
-在控制台给官方 `api.openai.com` 渠道（id 26）加 tag `redact-exempt`。
 **顺序很重要**：先打 tag，改写脚本才会跳过它。
+
+给官方 `api.openai.com` 渠道（id 26）加 tag `redact-exempt`。**beta7 已知缺陷**：GraphQL 的
+`updateChannel(appendTags: [...])` 返回 200 但不写入（`gql_mutation_input.go:303` 误传了 `i.Tags`），
+控制台的「追加 tag」若走这条路径同样无效。可靠做法是**整体写入 tags 数组**：
+
+```bash
+# 先 signin 拿 token（见 §4.1 的环境变量），然后：
+curl -s -X POST http://127.0.0.1:8020/admin/graphql   -H 'content-type: application/json' -H "Authorization: Bearer $TOKEN"   --data-binary '{"query":"mutation($id:ID!,$input:UpdateChannelInput!){updateChannel(id:$id,input:$input){id tags}}","variables":{"id":"gid://axonhub/Channel/26","input":{"tags":["redact-exempt"]}}}'
+```
+
+**打完必须核验**，不要相信 200：
+
+```bash
+bash privacy-redaction/scripts/check-trust-boundary.sh | grep -A2 '豁免清单'
+# 必须看到 #26 openai；看不到就说明 tag 没落盘，不要继续 --apply
+```
 
 ### 5.2 补全允许主机
 
@@ -253,8 +286,8 @@ bash scripts/redact-channels.sh --only <渠道id> --apply
 
 ```bash
 cd /srv/apps/axonhub
-docker compose -f docker-compose.yml -f privacy-redaction/docker-compose.redaction.yml \
-  up -d --force-recreate redact
+docker rm -f axonhub-redact
+docker-compose -f docker-compose.yml -f privacy-redaction/server-baseline/docker-compose.redaction.v1.yml up -d redact
 ```
 
 ### 5.3 改写
@@ -287,13 +320,16 @@ bash scripts/check-trust-boundary.sh
 最大渠道切换次数、自动禁用是否启用、触发自动禁用的状态码与次数。
 **本期不改这些设置，只记录。**
 
+若控制台从未保存过重试策略，`systems` 表没有 `retry_policy` 键，生效的是代码默认：
+`MaxChannelRetries=3`、`MaxSingleChannelRetries=2`、`LoadBalancerStrategy=adaptive`、自动禁用**关闭**。
+可用 `docker exec axonhub-postgres psql -U axonhub -d axonhub -At -c "SELECT key FROM systems WHERE key LIKE '%retry%'"` 确认。
+
 ### 6.2 AE-04
 
 选一个「至少两条受保护渠道 + 豁免渠道」都支持的模型，然后停掉脱敏层：
 
 ```bash
-docker compose -f docker-compose.yml -f privacy-redaction/docker-compose.redaction.yml \
-  stop redact
+docker stop axonhub-redact
 ```
 
 发请求并记录：
@@ -328,8 +364,8 @@ docker compose -f docker-compose.yml -f privacy-redaction/docker-compose.redacti
 5. 跑 `bash scripts/check-trust-boundary.sh` 确认无违规、无漂移；
 6. 在 `OPERATIONS-LOG.md` 记录。
 
-**若要新增的是可信官方直连渠道**：跳过 1、3，改为在控制台给它打 `redact-exempt` tag，
-然后跑核对脚本确认它出现在豁免清单中。
+**若要新增的是可信官方直连渠道**：跳过 1、3，改为按 §5.1 的方式**整体写入** `tags: ["redact-exempt"]`
+（不要用「追加」），然后跑核对脚本确认它出现在豁免清单中——看不到就是没生效。
 
 ### 定期核对
 
@@ -343,19 +379,23 @@ bash /srv/apps/axonhub/privacy-redaction/scripts/check-trust-boundary.sh
 
 ## 8. 脱敏层故障恢复
 
-脱敏层是受保护渠道的单点。它宕机时受保护渠道尝试失败，
-若命中全局自动禁用策略的状态码与次数，这些渠道会被**自动禁用**并设置 `auto_disabled_at`。
-beta7 **没有**渠道级自动重新启用。
+脱敏层是受保护渠道的单点。它宕机时受保护渠道对 `redact:8787` 的连接失败，axonhub 记为传输错误
+（不是 HTTP 状态码），按 `MaxChannelRetries=3` 转移；有豁免候选时落到 #26，没有则客户端收到 500。
+**任何第三方上游都不会收到明文**（阶段 4 实测）。
+
+**本部署的自动禁用未配置**（`systems` 表无 `retry_policy` 覆盖，代码默认 `AutoDisableChannel` 关闭），
+所以宕机**不会**禁用任何渠道，也就不存在「恢复被禁渠道」这一步。
+若你后来在控制台启用了自动禁用，才需要在 redact 恢复后逐条启用被禁渠道——
+注意 beta7 的 GraphQL `updateChannel(status:)` 也是 no-op（实测），只能走控制台 UI。
 
 恢复顺序：
 
 1. 确认脱敏层已恢复：
    ```bash
-   docker compose -f docker-compose.yml -f privacy-redaction/docker-compose.redaction.yml \
-     up -d redact
-   docker compose ... ps redact        # 期望 healthy
+   docker start axonhub-redact        # 容器还在时；不在则 docker-compose -f docker-compose.yml -f privacy-redaction/server-baseline/docker-compose.redaction.v1.yml up -d redact
+   docker inspect -f '{{.State.Health.Status}}' axonhub-redact    # 期望 healthy
    ```
-2. 在控制台把被自动禁用的渠道批量「恢复」，或逐条启用；
+2. （仅当你启用了自动禁用时）在控制台逐条启用被禁渠道；
 3. 跑 `bash scripts/check-trust-boundary.sh` 确认边界完好；
 4. 在 `OPERATIONS-LOG.md` 记录：动作 `recover-disabled`。
 

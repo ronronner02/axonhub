@@ -1,0 +1,5 @@
+[
+  {"id":"gid://axonhub/Channel/10","name":"sotamodel","type":"anthropic","status":"enabled","baseURL":"https://sotamodel.example","tags":[],"endpoints":null},
+  {"id":"gid://axonhub/Channel/26","name":"openai","type":"openai_responses","status":"enabled","baseURL":"https://api.openai.com/v1","tags":["redact-exempt"],"endpoints":null},
+  {"id":"gid://axonhub/Channel/27","name":"ccode","type":"anthropic","status":"enabled","baseURL":"http://redact:8787/$https://ccode.example/","tags":[],"endpoints":null}
+]

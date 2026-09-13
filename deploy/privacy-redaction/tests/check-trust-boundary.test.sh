@@ -120,6 +120,20 @@ has "退出码: 0 通过"
 has "--channels-file"
 has "--allowed-hosts"
 
+
+printf '
+[1m8. 生产形状回归（线上才发现的两个缺陷）[0m
+'
+run 1 "GraphQL gid:// id + baseURL 驼峰 + endpoints:null -> 正确解析（#10 直连=违规，#26 豁免，#27 受保护）" --channels-file "${FIX}/channels-gql-shape.json" --skip-host-check
+has "受保护渠道 (1)"
+has "豁免清单 (1)"
+has "违规清单 (1)"
+has "Channel/10 sotamodel: 明文直连"
+run 0 "psql 导出含 deleted_at<>0 的软删除行 -> 判定层忽略（不判违规）" --channels-file "${FIX}/channels-psql-softdeleted.json" --skip-host-check
+hasnt "#20 ghost"
+has "违规清单 (0)"
+run 1 "--allowed-hosts "" 表示空集合（开放代理条件），不再回退到 docker inspect" --channels-file "${FIX}/channels-compliant.json" --allowed-hosts ""
+has "缺少（渠道需要但未放行）"
 printf '\n\033[1m汇总\033[0m\n  PASS %d    FAIL %d\n' "$PASS" "$FAIL"
 [[ "$FAIL" -eq 0 ]] || { printf '\n\033[31m测试未通过\033[0m\n'; exit 1; }
 printf '\n\033[32m全部通过\033[0m\n'
