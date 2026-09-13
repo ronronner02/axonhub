@@ -1,0 +1,109 @@
+# 出站隐私脱敏层 overlay（CRG sidecar）
+#
+# compose v2 用法（本地冒烟 / v2 服务器）：
+#   cd /srv/apps/axonhub
+#   docker compose -f docker-compose.yml -f privacy-redaction/docker-compose.redaction.yml config
+#   docker compose -f docker-compose.yml -f privacy-redaction/docker-compose.redaction.yml up -d redact
+#
+# 设计约束：
+#   - redact 不发布任何端口，只在 axonhub 所在的内部网络可达（R-07）。
+#   - REDACT_ALLOWED_HOSTS 用 ${VAR:?} 强制非空，避免 CRG 退化成开放代理。
+#   - echo 只在 profile `verify` 下启动，常态不运行。
+#
+# compose v1 专用变体见 server-baseline/docker-compose.redaction.v1.yml；本文件面向 compose v2。
+
+
+services:
+  redact:
+    build:
+      context: ./crg
+      dockerfile: Dockerfile
+    image: ${REDACT_IMAGE:-axonhub-redact:local}
+    container_name: ${REDACT_CONTAINER_NAME:-axonhub-redact}
+    environment:
+      # 必须是 0.0.0.0：CRG 默认只监听 127.0.0.1，同网络容器将无法连接。
+      HOST: 0.0.0.0
+      PORT: "8787"
+      # 留空即开放代理，故强制要求非空。
+      REDACT_ALLOWED_HOSTS: ${REDACT_ALLOWED_HOSTS:?REDACT_ALLOWED_HOSTS must be set to a comma-separated host allowlist (empty means CRG forwards to ANY host)}
+      REDACT_MAX_BODY_BYTES: ${REDACT_MAX_BODY_BYTES:-16777216}
+      REDACT_MAX_REDACTIONS: ${REDACT_MAX_REDACTIONS:-16384}
+    networks:
+      - axonhub-network
+    # 不声明 ports：仅内部网络可达。
+    init: true
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=16m
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: ${REDACT_MEMORY_LIMIT:-512m}
+    pids_limit: 128
+    restart: unless-stopped
+    stop_grace_period: 15s
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+    healthcheck:
+      # 镜像里没有 curl/wget 的可靠保证，用 node 自身发请求。
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://127.0.0.1:8787/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))",
+        ]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  # 受控回显上游：只在验证时启动，用于证明「上游看到的是占位符」。
+  # 启动方式：docker compose --profile verify up -d echo
+  echo:
+    profiles:
+      - verify
+    build:
+      context: ./echo
+      dockerfile: Dockerfile
+    image: ${ECHO_IMAGE:-axonhub-redact-echo:local}
+    container_name: ${ECHO_CONTAINER_NAME:-axonhub-redact-echo}
+    environment:
+      PORT: "8080"
+    networks:
+      - axonhub-network
+    init: true
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=16m
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    restart: "no"
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+
+networks:
+  # ⚠️ 单点改动位置（计划 Open Question #1）
+  #
+  # redact 必须与 axonhub 容器同网络。服务器上先执行：
+  #   docker compose -f docker-compose.yml -f privacy-redaction/docker-compose.redaction.yml config
+  # 复核实际网络的 YAML 键名与网络名。
+  #
+  #  - 若服务器 compose 已用键名 axonhub-network 声明该网络：删除本 networks: 块，
+  #    让 overlay 直接复用上层声明（避免 external/internal 定义冲突）。
+  #  - 若网络键名不同：把上面 services.*.networks 与本块的键名一并改掉。
+  #  - 若网络由别的 compose 项目或手工创建：保留 external: true，用 name: 指向真实网络名。
+  #
+  # 本地冒烟（scripts/smoke-local.sh）会自行预创建该网络，故默认用 external。
+  axonhub-network:
+    external: true
+    name: ${REDACT_NETWORK_NAME:-axonhub-network}

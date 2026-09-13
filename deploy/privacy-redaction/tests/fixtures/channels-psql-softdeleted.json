@@ -1,0 +1,5 @@
+[
+  {"id":1,"name":"live","type":"anthropic","status":"enabled","base_url":"http://redact:8787/$https://live.example","tags":"[]","endpoints":"[]","deleted_at":0},
+  {"id":20,"name":"ghost","type":"openai_responses","status":"enabled","base_url":"https://ghost.example/v1","tags":"[]","endpoints":"[]","deleted_at":1788346012},
+  {"id":26,"name":"openai","type":"openai_responses","status":"enabled","base_url":"https://api.openai.com/v1","tags":"[\"redact-exempt\"]","endpoints":"[]","deleted_at":null}
+]

@@ -1,0 +1,9 @@
+[
+  {"id":1,"name":"ok-protected","type":"anthropic","status":"enabled","base_url":"http://redact:8787/$https://upstream-a.example","tags":[],"endpoints":[]},
+  {"id":10,"name":"direct-no-tag","type":"openai","status":"enabled","base_url":"https://sneaky-relay.example/v1","tags":[],"endpoints":[]},
+  {"id":11,"name":"endpoint-bypass","type":"anthropic","status":"enabled","base_url":"http://redact:8787/$https://upstream-b.example","tags":[],"endpoints":[{"api_format":"anthropic","base_url":"https://direct-bypass.example"}]},
+  {"id":12,"name":"websocket-chan","type":"openai","status":"enabled","base_url":"wss://realtime.example/v1","tags":[],"endpoints":[]},
+  {"id":13,"name":"empty-url","type":"openai","status":"enabled","base_url":"","tags":[],"endpoints":[]},
+  {"id":14,"name":"redundant-tag","type":"anthropic","status":"enabled","base_url":"http://redact:8787/$https://upstream-d.example","tags":["redact-exempt"],"endpoints":[]},
+  {"id":26,"name":"openai","type":"openai","status":"enabled","base_url":"https://api.openai.com/v1","tags":["redact-exempt"],"endpoints":[]}
+]

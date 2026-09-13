@@ -1,0 +1,7 @@
+[
+  {"id":1,"name":"relay-a","type":"anthropic","status":"enabled","base_url":"http://redact:8787/$https://upstream-a.example","tags":[],"endpoints":[]},
+  {"id":2,"name":"relay-b","type":"openai","status":"enabled","base_url":"http://redact:8787/$https://upstream-b.example/v1","tags":[],"endpoints":[]},
+  {"id":3,"name":"relay-c","type":"deepseek","status":"disabled","base_url":"http://redact:8787/$https://upstream-c.example","tags":[],"endpoints":[]},
+  {"id":26,"name":"openai","type":"openai","status":"enabled","base_url":"https://api.openai.com/v1","tags":["redact-exempt"],"endpoints":[]},
+  {"id":27,"name":"old-relay","type":"openai","status":"archived","base_url":"https://legacy.example/v1","tags":[],"endpoints":[]}
+]

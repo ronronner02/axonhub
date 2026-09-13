@@ -1,0 +1,59 @@
+# 出站隐私脱敏层 overlay —— docker-compose v1.29.2 专用版本
+#
+# 为什么单独一份：目标服务器只有 Python 版 docker-compose 1.29.2，没有 compose v2。
+# v1 与 v2 的三处不兼容，直接决定了本文件与上层 docker-compose.redaction.yml 的差异：
+#
+#   1. v1 不支持 `profiles:`          -> echo 服务拆到 docker-compose.verify.v1.yml，按需追加 -f
+#   2. v1 静默忽略 `deploy.resources` -> 改用 mem_limit / pids_limit（与服务器现有 compose 一致）
+#   3. v1 以「第一个 -f 文件所在目录」解析相对路径 -> build context 写成 ./privacy-redaction/crg
+#
+# 网络：服务器 docker-compose.yml 已用键名 axonhub-network 声明（driver: bridge，非 external），
+# 实际网络名为 axonhub_axonhub-network。overlay 直接复用该声明，不再重复定义，避免定义冲突。
+#
+# 用法（在 /srv/apps/axonhub 下）：
+#   docker-compose -f docker-compose.yml -f privacy-redaction/server-baseline/docker-compose.redaction.v1.yml config
+#   docker-compose -f docker-compose.yml -f privacy-redaction/server-baseline/docker-compose.redaction.v1.yml up -d redact
+
+version: "3.8"
+
+services:
+  redact:
+    build:
+      context: ./privacy-redaction/crg
+      dockerfile: Dockerfile
+    image: axonhub-redact:local
+    container_name: axonhub-redact
+    environment:
+      # 必须 0.0.0.0：CRG 默认只监听 127.0.0.1，同网络的 axonhub 容器会连不上。
+      HOST: "0.0.0.0"
+      PORT: "8787"
+      # 留空即退化为开放代理，故强制非空。
+      REDACT_ALLOWED_HOSTS: ${REDACT_ALLOWED_HOSTS:?REDACT_ALLOWED_HOSTS must be set (empty means CRG forwards to ANY host)}
+      REDACT_MAX_BODY_BYTES: ${REDACT_MAX_BODY_BYTES:-16777216}
+      REDACT_MAX_REDACTIONS: ${REDACT_MAX_REDACTIONS:-16384}
+    networks:
+      - axonhub-network
+    # 不声明 ports：只在内部网络可达（R-07）。
+    init: true
+    read_only: true
+    tmpfs:
+      - "/tmp:rw,noexec,nosuid,size=16m,mode=1777"
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    restart: unless-stopped
+    stop_grace_period: 15s
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8787/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    mem_limit: 512m
+    pids_limit: 128
