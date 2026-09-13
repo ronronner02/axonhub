@@ -11,3 +11,5 @@ Dockerfile text eol=lf
 .env.example text eol=lf
 SHA256SUMS text eol=lf
 LICENSE text eol=lf
+# 根 .gitignore 用 "*" + "!*.*" 只放行带扩展名的文件；SHA256SUMS 无扩展名，
+# 已用 git add -f 显式跟踪。若新增其它无扩展名文件，同样需要 -f。
