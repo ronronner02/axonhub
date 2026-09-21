@@ -24,6 +24,7 @@
 8. [脱敏层故障恢复](#8-脱敏层故障恢复)
 9. [回滚](#9-回滚)
 10. [升级 CRG](#10-升级-crg)
+11. [受限上游：标志位封套与专用别名](#11-受限上游标志位封套与专用别名)
 
 任一阶段失败就停在该阶段，不进入下一阶段，**不得为了让验收通过而把受保护渠道回退为直连**（BR-005）。
 
@@ -367,6 +368,11 @@ docker stop axonhub-redact
 **若要新增的是可信官方直连渠道**：跳过 1、3，改为按 §5.1 的方式**整体写入** `tags: ["redact-exempt"]`
 （不要用「追加」），然后跑核对脚本确认它出现在豁免清单中——看不到就是没生效。
 
+### 按渠道改封套标志位
+
+受限上游（anyrouter / agentrouter 的 Claude 渠道）需要关闭高熵检测时，用 `--flags` 改封套，
+不要手改 Base URL。命令与判据见 [第 11.2 节](#112-改封套标志位)。
+
 ### 定期核对
 
 ```bash
@@ -407,6 +413,9 @@ bash /srv/apps/axonhub/privacy-redaction/scripts/check-trust-boundary.sh
 
 回滚会让渠道恢复明文直连，**隐私防护随之消失**。必须是显式操作并留记录（BR-005）。
 
+> 带标志位的封套（如 `PSIBEG$https://…`）已可正确还原为真实上游 URL，
+> 前提是使用当前版本的脚本。旧版脚本只剥开头的 `$`，会留下 `PSIBEG$https://…` 残段。
+
 ```bash
 cd /srv/apps/axonhub/privacy-redaction
 bash scripts/redact-channels.sh --restore <id,...>          # 先看计划（无 --yes 不执行）
@@ -437,6 +446,220 @@ bash scripts/redact-channels.sh --restore <id,...> --yes --apply
 
 ---
 
+## 11. 受限上游：标志位封套与专用别名
+
+anyrouter 与 agentrouter 都不接受「中转站那种转发」，但两家的门禁看的东西不同，处理方式也不同。
+
+| 上游 | 渠道 | 门禁看什么 | 本节的处理 |
+| --- | --- | --- | --- |
+| anyrouter（`anyrouter.top`） | 11、12、13 | 请求体是否像真实 Claude Code 会话。字面量 `[1m]` 模型名、被改写过的 `metadata.user_id` 都会被判拒 | 封套改 `PSIBEG$` 关掉高熵检测；渠道只暴露裸名 `claude-fable-5-1` |
+| agentrouter（`ps.air-outer.com`） | 3、8 | `User-Agent` 是否以 `claude-cli/` 开头 | 同一封套，再打开渠道级 UA 透传 |
+
+客户端侧不需要任何改动：Claude Code 只配中转站的 URL 与 Key，用 `/model` 选专用别名即可（见 11.6）。
+
+### 11.1 为什么关高熵检测，为什么只关这五条
+
+真实 Claude Code 请求的 `metadata.user_id` 是一个 JSON 字符串，内含 64 位十六进制的 `device_id` 与 UUID 形态的 `session_id`。高熵检测（标志位 `H`）会把这两个值判为随机 token 并替换成占位符，anyrouter 据此认定请求不是真实会话。
+
+封套 `PSIBEG$` 表示只保留其余六类检测：
+
+| 字母 | 检测 | `PSIBEG$` 下 |
+| --- | --- | --- |
+| `H` | 高熵（无前缀的随机 token） | **关闭** |
+| `P` | 手机号 | 保留 |
+| `S` | 密钥（含 `sk-` 等前缀形态） | 保留 |
+| `I` | 身份证件 | 保留 |
+| `B` | 银行卡 | 保留 |
+| `E` | 邮箱 | 保留 |
+| `G` | gitleaks 规则 | 保留 |
+
+代价写在「已知边界」里：这五条渠道上，**没有可识别前缀的随机 token 不再被拦**。密钥、手机、身份、银行、邮箱、gitleaks 六类仍然照常替换与还原，本地冒烟第 3b 段对此有对照证据（`PSIBEG$` 下 `device_id` / `session_id` 原样到达上游、假密钥仍被替换；默认 `$` 下 `device_id` 被改写）。
+
+其余受保护渠道**保持默认 `$`（全部检测开启）**。不要顺手把别的渠道也改成 `PSIBEG$`。
+
+### 11.2 改封套标志位
+
+改标志位与回滚都走脚本，不要在控制台手改 Base URL。
+
+```bash
+cd /srv/apps/axonhub/privacy-redaction
+
+# 1) 先看计划（不加 --apply 一定是 dry-run）
+bash scripts/redact-channels.sh --only 3,8,11,12,13 --flags PSIBEG
+
+# 2) 确认计划里是 reflag (5)、旧值到新值都对，再执行
+bash scripts/redact-channels.sh --only 3,8,11,12,13 --flags PSIBEG --yes --apply
+```
+
+关于门禁：`--flags` 不是全集（也就是**削弱**检测）时，脚本要求同时给 `--only` 与 `--yes`，否则只打印计划并以退出码 1 结束，同时列出被关闭的检测名并提示按 BR-005 记录。反方向（加强检测，例如回到全集 `HPSIBEG`）不需要 `--yes`。
+
+执行后立刻核对：
+
+```bash
+bash scripts/check-trust-boundary.sh
+```
+
+期望：这五条出现在「受保护渠道」；新增的「降级封套 (5)」段列出它们并注明关闭了高熵检测；「豁免清单」仍只有官方 OpenAI 渠道；「违规清单 (0)」；允许主机集合一致。**`REDACT_ALLOWED_HOSTS` 本节不改**——标志位段不进入主机名解析。
+
+然后在 `OPERATIONS-LOG.md` 记一行，动作 `reflag`，写明关闭了哪些检测。
+
+### 11.3 渠道 11–13 的模型列表与默认测试模型
+
+anyrouter 的 key 只提供 `claude-fable-5-1`，所以这三条渠道收窄为只暴露裸名，避免 `any/` 别名把该站没有的模型也暴露出去。
+
+控制台 → 渠道 → 逐条编辑 11、12、13：
+
+- 支持的模型：删除三个 `[1m]` 字面量，只留 `claude-fable-5-1`
+- 默认测试模型：改为 `claude-fable-5-1`
+
+**每条保存后立刻核验。** `updateChannel` 对 `settings` 是整体覆盖，控制台表单若漏字段会把 `headerOverrideOperations` 一起清掉：
+
+```bash
+docker exec -i axonhub-postgres psql -U axonhub -d axonhub -c "
+SELECT id, supported_models, default_test_model,
+       settings->'headerOverrideOperations' AS header_ops
+FROM channels WHERE id IN (11,12,13) ORDER BY id;"
+```
+
+期望：`supported_models` 为 `["claude-fable-5-1"]`、`default_test_model` 为 `claude-fable-5-1`、`header_ops` 仍含 anthropic-beta 覆盖。丢了就在控制台补回，并在操作日志里记下这次丢失。
+
+### 11.4 渠道 3、8 打开 User-Agent 透传
+
+agentrouter 的门禁只认 `claude-cli/` 前缀。渠道级 `passThroughUserAgent` 未设时会继承全局设置（线上为 `false`，出站写死 `axonhub/1.0`），所以必须逐条打开渠道级开关，**不要改全局**。
+
+控制台 → 渠道 → 编辑 3、8 → 打开「透传 User-Agent」。保存后核验：
+
+```bash
+docker exec -i axonhub-postgres psql -U axonhub -d axonhub -c "
+SELECT id, base_url, settings->>'passThroughUserAgent' AS ua_pass
+FROM channels WHERE id IN (3,8) ORDER BY id;"
+```
+
+期望 `ua_pass` 为 `true`，`base_url` 以 `http://redact:8787/PSIBEG$` 开头。
+
+### 11.5 三个专用模型条目
+
+别名落在「模型关联」层：新建模型条目，各自只关联到指定渠道，关联里的渠道模型名是**裸名真名**，出站即裸名。
+
+控制台 → 模型管理 → 新建，三条：
+
+| 模型 ID | 关联（类型：指定渠道模型） |
+| --- | --- |
+| `any/claude-fable-5-1` | 渠道 11 → `claude-fable-5-1`（优先级 0）、渠道 12（10）、渠道 13（20） |
+| `agent/claude-opus-5` | 渠道 3 → `claude-opus-5`（优先级 0）、渠道 8（10） |
+| `agent/claude-opus-4-8` | 渠道 3 → `claude-opus-4-8`（优先级 0）、渠道 8（10） |
+
+developer 填 `anthropic`，类型 chat。优先级数值越小越优先，多条关联构成故障转移池。
+
+若控制台表单不接受含 `/` 的模型 ID（`models.model_id` 本身无格式约束），用 GraphQL 备用路径。`CreateModelInput` 里 `developer` / `modelID` / `name` / `icon` / `group` / `modelCard` / `settings` 都是必填，`modelCard` 内各字段可选，`settings.associations` 必填：
+
+```graphql
+mutation {
+  createModel(input: {
+    developer: "anthropic"
+    modelID: "any/claude-fable-5-1"
+    name: "any/claude-fable-5-1"
+    icon: "Anthropic"
+    group: "anthropic"
+    type: chat
+    modelCard: {}
+    settings: {
+      associations: [
+        { type: "channel_model", priority: 0,  channelModel: { channelId: 11, modelId: "claude-fable-5-1" } }
+        { type: "channel_model", priority: 10, channelModel: { channelId: 12, modelId: "claude-fable-5-1" } }
+        { type: "channel_model", priority: 20, channelModel: { channelId: 13, modelId: "claude-fable-5-1" } }
+      ]
+    }
+  }) { id modelID }
+}
+```
+
+核验。关联不是独立表，它存在 `models.settings` 这个 JSON 列里（`ModelSettings.Associations`），所以要展开 JSON 数组而不是 join：
+
+```bash
+docker exec -i axonhub-postgres psql -U axonhub -d axonhub -c "
+SELECT m.model_id, m.status,
+       a->>'type'                        AS assoc_type,
+       a->>'priority'                    AS priority,
+       a->'channelModel'->>'channelId'   AS channel_id,
+       a->'channelModel'->>'modelId'     AS upstream_model
+FROM models m,
+     jsonb_array_elements((m.settings::jsonb)->'associations') a
+WHERE m.model_id IN ('any/claude-fable-5-1','agent/claude-opus-5','agent/claude-opus-4-8')
+ORDER BY m.model_id, priority;"
+```
+
+期望：三个条目都是 enabled，关联与上表逐行一致，`upstream_model` 全部是不带 `[1m]` 的裸名。
+
+旧的 `[1m]` 条目与关联本节**不动**。渠道 11–13 去掉 `[1m]` 字面量后，那些关联自然不再匹配（静默、无报错）。
+
+### 11.6 客户端用法
+
+Claude Code 里只配中转站的 URL 与 Key，然后：
+
+```
+/model any/claude-fable-5-1[1m]     # 走 anyrouter 三条渠道
+/model agent/claude-opus-5[1m]      # 走 agentrouter
+/model agent/claude-opus-4-8[1m]    # 走 agentrouter
+```
+
+CLI 会自己剥掉 `[1m]` 并附上 1m 上下文的 beta 头，所以中转站收到的模型名是不带后缀的别名，出站给上游的是裸名真名。本机不需要挂 VPN，也不需要为这两家单独设环境变量。
+
+### 11.7 验收
+
+探测要少而准：每个别名 1–2 条消息。默认重试策略下一次彻底失败最多打 9 次上游（3 渠道 × 3 次），anyrouter 会把拒绝也记进探测。
+
+| AE | 怎么做 | 判据 |
+| --- | --- | --- |
+| AE1 | `/model any/claude-fable-5-1[1m]` 发一条短消息 | 客户端收到正常补全；该请求的 `request_executions` 恰一条，`channel_id` ∈ {11,12,13}，状态成功 |
+| AE2 | 查同一次执行的出站正文 | `request_body->>'model'` 是 `claude-fable-5-1`，不带 `[1m]` |
+| AE3 | 对比入站与出站的 `metadata.user_id` | `session_id` 仍是 UUID 未被占位符替换；上游返回 200。机制层证据引用本地冒烟第 3b 段 |
+| AE4 | `/model agent/claude-opus-5[1m]` 发一条消息 | 出站 `request_headers` 的 User-Agent 以 `claude-cli/` 开头，上游不再 401。**402 记为「通过门禁、配额不足」，不算失败** |
+| AE5 | 跑 `check-trust-boundary.sh` | 见 11.2 的期望 |
+| AE6 | `bash scripts/redact-channels.sh --restore 11`（**不加** `--apply`） | 计划行显示还原为 `https://anyrouter.top`，不留 `PSIBEG$` 残段 |
+| AE7 | 经 anyrouter 别名发一条含假 `sk-` 密钥并要求复述的消息 | 客户端收到原值；模型回复表明它看到的是占位符 |
+
+查出站记录：
+
+```bash
+docker exec -i axonhub-postgres psql -U axonhub -d axonhub -c "
+SELECT e.id, e.channel_id, e.status,
+       e.request_body->>'model'                   AS out_model,
+       e.request_headers->>'User-Agent'           AS out_ua
+FROM request_executions e
+WHERE e.request_id = <请求id>
+ORDER BY e.id;"
+```
+
+`metadata` 只能证明脱敏**前**的值——CRG 不记录正文，所以「上游确实收到原样 UUID」以 anyrouter 返回 200 为准。
+
+结论写入 `ACCEPTANCE-RECORD.md` 的「受限上游别名（2026-09）」表，注明日期与所用脚本的提交号。
+
+**AE1 失败就停。** 读取该次执行的出站正文与头，对照门禁特征记录下来，回到 owner，不要循环探测。
+
+### 11.8 回滚
+
+按需要选一层，不要一次全推翻：
+
+```bash
+cd /srv/apps/axonhub/privacy-redaction
+
+# a) 只恢复全部检测（加强，不需要 --yes）
+bash scripts/redact-channels.sh --only 3,8,11,12,13 --flags HPSIBEG --apply
+
+# b) 彻底恢复明文直连（先看计划，再加 --yes --apply）
+bash scripts/redact-channels.sh --restore 3,8,11,12,13
+bash scripts/redact-channels.sh --restore 3,8,11,12,13 --yes --apply
+```
+
+b) 必须用**已修复的脚本**：旧版 restore 只剥开头的 `$`，对 `PSIBEG$https://…` 会留下错误残段。执行前确认脚本里有 `--flags` 与 `reflag`（`bash scripts/redact-channels.sh --help` 能看到）。
+
+别名回退：在控制台禁用或删除那三个模型条目。UA 回退：关掉渠道 3、8 的透传开关。
+
+每一步都在 `OPERATIONS-LOG.md` 记录，回滚要写明原因（BR-005）。
+
+---
+
 ## 已知边界
 
 - 助记词（12/24 个自然单词）不在检测范围（BR-002）。hex 私钥与 `0x` 地址预期由高熵检测器
@@ -446,4 +669,6 @@ bash scripts/redact-channels.sh --restore <id,...> --yes --apply
 - 脱敏层重启会更换运行时盐，占位符随之改变，上游提示缓存前缀失效。
 - 本机 Postgres 中的请求/响应正文仍是明文存档，本期不动。
 - 图片、音频等二进制字段不检查；非 JSON 端点一律拒绝（415）。
+- 本地封装 `entry.mjs` 会在 CRG parse 之前把超大 `data:` URI 和媒体字段（`image_url` / `b64_json` 等）抠走，脱敏后再拼回。vendor `worker.js` 未改。可用 `REDACT_MEDIA_EXTRACT=0` 关闭。
+- 走 `PSIBEG$` 封套的渠道（3/8/11/12/13）关闭了高熵检测：无前缀的随机 token 不再被拦，密钥/手机/身份/银行/邮箱/gitleaks 六类仍生效。见第 11 节。
 - 故障转移候选可能包含豁免渠道，此时明文会发往官方直连上游（BR-001 允许）。

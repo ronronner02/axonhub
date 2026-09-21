@@ -161,7 +161,6 @@ locales_backup
 config.schema.json
 *.db-shm
 *.db-wal
-*.agent/summary
 .factory
 .omo/
 .omc/
@@ -169,3 +168,37 @@ config.schema.json
 .ace-tool/
 .omx/
 deploy_dev.sh
+
+# spec-first:start
+# host-local scratch and settings
+.claude/tasks/
+.claude/worktrees/
+.qoder/settings.local.json
+
+# spec-first local setup and workflow runtime artifacts
+.spec-first/*.local.yaml
+.spec-first/config.local.yaml
+.spec-first/config/*.json
+.spec-first/audits/
+.spec-first/governance/
+.spec-first/app-audit/
+.spec-first/workflows/
+.spec-first/workspace/
+.spec-first/sessions/
+
+# optional provider local artifacts
+.codegraph/
+graphify-out/
+.graphify/
+# spec-first:end
+
+# Local AI/spec-first host installations. These are generated per workstation
+# and must not be mixed into product, plan, or durable-learning commits.
+.agents/
+.codex/
+.opencode/
+.pi/
+.spec-first/config.local.example.yaml
+
+# Local review and execution summaries.
+.agent/summary/

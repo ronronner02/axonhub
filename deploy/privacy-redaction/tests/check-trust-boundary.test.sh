@@ -134,6 +134,58 @@ hasnt "#20 ghost"
 has "违规清单 (0)"
 run 1 "--allowed-hosts "" 表示空集合（开放代理条件），不再回退到 docker inspect" --channels-file "${FIX}/channels-compliant.json" --allowed-hosts ""
 has "缺少（渠道需要但未放行）"
+printf '\n\033[1m9. 封套标志位与降级封套（KTD-5）\033[0m\n'
+
+FLAGGED="$(write_fixture flagged.json '[
+  {"id":1,"name":"relay-a","type":"anthropic","status":"enabled","base_url":"http://redact:8787/$https://upstream-a.example","tags":[],"endpoints":[]},
+  {"id":3,"name":"agent-claude","type":"anthropic","status":"enabled","base_url":"http://redact:8787/PSIBEG$https://agent-a.example","tags":[],"endpoints":[]},
+  {"id":11,"name":"any-claude","type":"anthropic","status":"enabled","base_url":"http://redact:8787/PSIBEG$https://any-a.example","tags":[],"endpoints":[]},
+  {"id":26,"name":"openai","type":"openai","status":"enabled","base_url":"https://api.openai.example/v1","tags":["redact-exempt"],"endpoints":[]}
+]')"
+run 0 "标志位夹具：3 条受保护、其中 2 条降级（只关高熵检测）→ 通过" \
+  --channels-file "$FLAGGED" \
+  --allowed-hosts "upstream-a.example,agent-a.example,any-a.example"
+has "受保护渠道 (3)"
+has "降级封套 (2)"
+has "#3 agent-claude  PSIBEG（关闭: 高熵检测）"
+has "#11 any-claude  PSIBEG（关闭: 高熵检测）"
+hasnt "#1 relay-a  "
+has "豁免清单 (1)"
+has "#26 openai"
+has "允许主机集合: 一致"
+has "结论: 通过"
+
+run 0 "合规夹具全为空段 → 降级封套 (0)，其余判定不变" \
+  --channels-file "${FIX}/channels-compliant.json" \
+  --allowed-hosts "upstream-a.example,upstream-b.example,upstream-c.example"
+has "降级封套 (0)"
+has "豁免清单 (1)"
+has "#26 openai"
+has "结论: 通过"
+
+F="$(write_fixture badflag.json '[{"id":31,"name":"badflag","status":"enabled","base_url":"http://redact:8787/XYZ$https://a.example","tags":[],"endpoints":[]}]')"
+run 1 "标志位段含 HPSIBEG 之外的字母 → 违规且写明该段（CRG 运行时会 400）" --channels-file "$F" --skip-host-check
+has "违规清单 (1)"
+has "#31 badflag: "
+has "XYZ"
+has "结论: 不通过"
+
+F="$(write_fixture epflag.json '[{"id":32,"name":"ep-flagged","status":"enabled","base_url":"http://redact:8787/$https://b-base.example","tags":[],"endpoints":[{"base_url":"http://redact:8787/PSIBEG$https://b-ep.example"}]}]')"
+run 0 "base 全开 + endpoint 降级 → 仍受保护，降级按 URL 逐条列出" --channels-file "$F" --skip-host-check
+has "受保护渠道 (1)"
+has "降级封套 (1)"
+has "#32 ep-flagged  PSIBEG（关闭: 高熵检测）"
+has "违规清单 (0)"
+
+F="$(write_fixture manyoff.json '[{"id":33,"name":"only-se","status":"enabled","base_url":"http://redact:8787/SE$https://c.example","tags":[],"endpoints":[]}]')"
+run 0 "只留密钥+邮箱 → 关闭集按 HPSIBEG 顺序输出中文名" --channels-file "$F" --skip-host-check
+has "#33 only-se  SE（关闭: 高熵检测、手机号、身份证件、银行卡、gitleaks 规则）"
+
+run 0 "--skip-host-check 下降级清单仍然输出" \
+  --channels-file "$FLAGGED" --skip-host-check
+has "降级封套 (2)"
+has "允许主机集合: 已跳过 (--skip-host-check)"
+
 printf '\n\033[1m汇总\033[0m\n  PASS %d    FAIL %d\n' "$PASS" "$FAIL"
 [[ "$FAIL" -eq 0 ]] || { printf '\n\033[31m测试未通过\033[0m\n'; exit 1; }
 printf '\n\033[32m全部通过\033[0m\n'

@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
 # 信任边界核对（R-05 / R-07 / AE-07）
 #
-# 输出三段清单并判定：
+# 输出四段清单并判定：
 #   受保护渠道  —— base_url 与所有 endpoints[].base_url 都经脱敏层
+#   降级封套    —— 受保护但封套标志位段非空，即关掉了部分检测；只作提示，不影响退出码
 #   豁免清单    —— 带 redact-exempt tag 且未经脱敏层（AE-07 期望只含官方 openai）
-#   违规清单    —— 其余任何情况；出现即非零退出
+#   违规清单    —— 其余任何情况（含标志位段有非法字母）；出现即非零退出
 # 另外比对「渠道推导出的期望上游主机集合」与「redact 容器实际 REDACT_ALLOWED_HOSTS」，
 # 不相等即判为漂移（KTD-5）。
 #
@@ -184,7 +185,24 @@ const upstreamHost = (url) => {
   try { return new URL(url.slice(d + 1)).hostname.toLowerCase(); } catch { return null; }
 };
 
-const protectedList = [], exemptList = [], violations = [], notes = [];
+// ── 封套标志位段 ──
+// 受保护 URL 形如 <PREFIX><标志位段>$<上游>。字母集合与中文名取自 crg/worker.js 的
+// ALL_FLAG_LETTERS / FLAG_NAMES，与 redact-channels.sh 的 flag_cn() 保持一致。
+// 空段等价全部检测开启；非空段说明只留了段内那几项，其余被关掉。
+const ALL_FLAG_LETTERS = "HPSIBEG";
+const FLAG_CN = { H:"高熵检测", P:"手机号", S:"密钥", I:"身份证件", B:"银行卡", E:"邮箱", G:"gitleaks 规则" };
+// PREFIX 之后到第一个 $ 之间即标志位段。无 $ 返回 null（形状异常已由 upstreamHost 判违规）。
+const flagSeg = (url) => {
+  const rest = url.slice(PREFIX.length);
+  const d = rest.indexOf("$");
+  return d < 0 ? null : rest.slice(0, d);
+};
+// 段内 ALL_FLAG_LETTERS 之外的字符：CRG parseFlags 对未知字母会返回 400，属真实错误。
+const badFlagChars = (seg) => [...new Set([...seg].filter((c) => !ALL_FLAG_LETTERS.includes(c)))];
+// 关闭集 = 全集减去该段，按 ALL_FLAG_LETTERS 顺序输出中文名。
+const offFlagNames = (seg) => [...ALL_FLAG_LETTERS].filter((c) => !seg.includes(c)).map((c) => FLAG_CN[c]);
+
+const protectedList = [], downgradedList = [], exemptList = [], violations = [], notes = [];
 const expectedHosts = new Set();
 
 for (const c of channels) {
@@ -212,6 +230,15 @@ for (const c of channels) {
       const h = upstreamHost(u.url);
       if (h) expectedHosts.add(h);
       else violations.push({ id, name, reason: `已加前缀但 $ 之后不是合法上游 URL（${u.label}=${u.url}）` });
+      // 标志位段：非法字母判违规（CRG 运行时返回 400），合法非空只记降级不影响退出码。
+      const seg = flagSeg(u.url);
+      if (seg === null) continue;
+      const bad = badFlagChars(seg);
+      if (bad.length) {
+        violations.push({ id, name, reason: `封套标志位段含非法字符 ${bad.join("")}（${u.label} 段=${seg}，合法字母 ${ALL_FLAG_LETTERS}），CRG 会返回 400` });
+      } else if (seg) {
+        downgradedList.push({ id, name, seg, off: offFlagNames(seg) });
+      }
     }
     if (isExemptTagged) notes.push({ id, name, note: `带 ${EXEMPT_TAG} tag 但实际经脱敏层，tag 多余（不判违规）` });
     continue;
@@ -241,6 +268,10 @@ const line = (s) => console.log(s);
 line("");
 line(`受保护渠道 (${protectedList.length})`);
 for (const c of protectedList) line(`  #${c.id} ${c.name}`);
+line("");
+line(`降级封套 (${downgradedList.length})`);
+if (!downgradedList.length) line("  (空)");
+for (const d of downgradedList) line(`  #${d.id} ${d.name}  ${d.seg}（关闭: ${d.off.join("、") || "无"}）`);
 line("");
 line(`豁免清单 (${exemptList.length})  ← AE-07 期望只含官方 openai`);
 if (!exemptList.length) line("  (空)");

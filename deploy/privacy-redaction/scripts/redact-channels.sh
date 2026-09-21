@@ -34,6 +34,20 @@ YES=0
 PLAN_FILE=""
 RESTORE_IDS=""
 ONLY_IDS=""
+FLAGS_RAW=""
+FLAGS_SET=0
+FLAGS=""
+
+# CRG 封套标志位，取自 crg/worker.js 的 ALL_FLAG_LETTERS / FLAG_NAMES。
+# 空段等价全开；中文名只用于「关闭了哪些检测」的提示文案。
+ALL_FLAG_LETTERS="HPSIBEG"
+flag_cn() {
+  case "$1" in
+    H) printf '高熵检测' ;; P) printf '手机号' ;; S) printf '密钥' ;;
+    I) printf '身份证件' ;; B) printf '银行卡' ;; E) printf '邮箱' ;;
+    G) printf 'gitleaks 规则' ;; *) printf '%s' "$1" ;;
+  esac
+}
 
 usage() {
   cat <<'EOF'
@@ -42,9 +56,12 @@ usage() {
 选项:
   --plan-from-file <路径>  从 JSON 文件读渠道并只出计划，完全不连网。
   --only <id,...>          只处理指定渠道 id。
+  --flags <LETTERS>        封套标志位，HPSIBEG 的子集（大写、不重复）。
+                           省略 = 沿用各渠道现状；全集 HPSIBEG 等价空段（全部检测开启）。
+                           削弱检测（非全集）时必须同时给 --only 与 --yes。
   --restore <id,...>       生成去前缀（回滚）计划；执行需同时给 --yes。
   --apply                  真正执行改写（默认只 dry-run）。
-  --yes                    确认执行回滚。仅对 --restore 生效。
+  --yes                    确认执行回滚或削弱检测。
   -h, --help               显示本帮助。
 
 环境变量:
@@ -55,9 +72,13 @@ usage() {
   REDACT_PREFIX       封套前缀，默认 http://redact:8787/
   REDACT_EXEMPT_TAG   豁免 tag，默认 redact-exempt
 
+标志位字母（与 crg/worker.js 一致）:
+  H 高熵  P 手机  S 密钥  I 身份  B 银行  E 邮箱  G gitleaks
+
 动作分类:
   rewrite          未受保护的第三方渠道 -> 加封套前缀
-  skip-protected   已加前缀，幂等跳过
+  reflag           已加前缀但标志位与 --flags 不同 -> 只替换标志位段
+  skip-protected   已加前缀（且标志位与 --flags 等价），幂等跳过
   skip-exempt      带豁免 tag，永不改写（即使 --only 指定）
   skip-archived    已归档
   skip-deleted     ent 软删除行（GraphQL 不可见，仅 psql 导出会出现）
@@ -69,11 +90,19 @@ usage() {
 EOF
 }
 
+die() { printf '错误: %s\n' "$1" >&2; exit 2; }
+
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --plan-from-file) PLAN_FILE="${2:-}"; shift 2 ;;
-    --only) ONLY_IDS="${2:-}"; shift 2 ;;
-    --restore) RESTORE_IDS="${2:-}"; shift 2 ;;
+    --plan-from-file|--only|--flags|--restore)
+      [[ $# -ge 2 && -n "${2:-}" && "$2" != -* ]] || die "$1 需要一个参数（且不能为空）"
+      case "$1" in
+        --plan-from-file) PLAN_FILE="$2" ;;
+        --only) ONLY_IDS="$2" ;;
+        --flags) FLAGS_RAW="$2"; FLAGS_SET=1 ;;
+        --restore) RESTORE_IDS="$2" ;;
+      esac
+      shift 2 ;;
     --apply) APPLY=1; shift ;;
     --yes) YES=1; shift ;;
     -h|--help) usage; exit 0 ;;
@@ -81,14 +110,37 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-die() { printf '错误: %s\n' "$1" >&2; exit 2; }
+# ── --flags 校验与规范化 ──────────────────────────────────────────────────────
+# 字母必须是 ALL_FLAG_LETTERS 的子集、大写、不重复；按 ALL_FLAG_LETTERS 顺序
+# 规范化；全集归一为空段，使写出的封套与现状 "$" 逐字一致。
+if [[ "$FLAGS_SET" == "1" ]]; then
+  [[ -z "$RESTORE_IDS" ]] || die "--flags 与 --restore 互斥，不能同用"
+  [[ "$FLAGS_RAW" =~ ^[A-Z]*$ ]] \
+    || die "--flags 只接受大写字母（合法字母: ${ALL_FLAG_LETTERS}），实得: ${FLAGS_RAW}"
+  _seen=""
+  for (( _i=0; _i<${#FLAGS_RAW}; _i++ )); do
+    _ch="${FLAGS_RAW:$_i:1}"
+    [[ "$ALL_FLAG_LETTERS" == *"$_ch"* ]] \
+      || die "--flags 含非法字母 '${_ch}'（合法字母: ${ALL_FLAG_LETTERS}）"
+    [[ "$_seen" != *"$_ch"* ]] || die "--flags 含重复字母 '${_ch}'"
+    _seen="${_seen}${_ch}"
+  done
+  _norm=""
+  for (( _i=0; _i<${#ALL_FLAG_LETTERS}; _i++ )); do
+    _ch="${ALL_FLAG_LETTERS:$_i:1}"
+    [[ "$FLAGS_RAW" == *"$_ch"* ]] && _norm="${_norm}${_ch}"
+  done
+  [[ "$_norm" != "$ALL_FLAG_LETTERS" ]] || _norm=""
+  FLAGS="$_norm"
+  unset _seen _i _ch _norm
+fi
 
 # ── node 求值器（与 check-trust-boundary.sh 相同策略）──────────────────────────
 # 目标服务器只有 docker、没有 node。所有 JS 片段都必须经由同一个分派器，
 # 不允许在脚本任何位置直接调用裸的 node 可执行文件。
 
 # 容器内 node 需要显式透传的环境变量（内联 JS 片段读取的全部键）。
-NODE_ENV_KEYS=(CHANNELS_JSON PREFIX EXEMPT_TAG RESTORE_IDS ONLY_IDS EMAIL PASS AFTER Q V ACC RESP P I X R)
+NODE_ENV_KEYS=(CHANNELS_JSON PREFIX EXEMPT_TAG RESTORE_IDS ONLY_IDS FLAGS FLAGS_SET EMAIL PASS AFTER Q V ACC RESP P I X R)
 
 pick_node_runner() {
   if command -v node >/dev/null 2>&1; then echo host
@@ -188,7 +240,7 @@ fi
 [[ -n "$CHANNELS_JSON" ]] || die "渠道数据为空"
 
 
-export CHANNELS_JSON PREFIX EXEMPT_TAG RESTORE_IDS ONLY_IDS
+export CHANNELS_JSON PREFIX EXEMPT_TAG RESTORE_IDS ONLY_IDS FLAGS FLAGS_SET
 
 # ── 计划层 ────────────────────────────────────────────────────────────────────
 # 输出人类可读计划到 stderr，机器可读动作（JSON 行）到 stdout。
@@ -198,6 +250,42 @@ const PREFIX = process.env.PREFIX, EXEMPT_TAG = process.env.EXEMPT_TAG;
 const restoreIds = new Set(String(process.env.RESTORE_IDS || "").split(",").map(s=>s.trim()).filter(Boolean));
 const onlyIds = new Set(String(process.env.ONLY_IDS || "").split(",").map(s=>s.trim()).filter(Boolean));
 const isRestore = restoreIds.size > 0;
+
+// 封套标志位。FLAGS 已由 shell 规范化（按 ALL_FLAG_LETTERS 排序，全集归一为空段）；
+// FLAGS_SET 区分「没给 --flags」与「给了全集」——前者沿用现状，后者要求写成 "$"。
+const ALL_FLAG_LETTERS = "HPSIBEG";
+const flagsSet = process.env.FLAGS_SET === "1";
+const wantFlags = process.env.FLAGS || "";
+// 与 shell 侧同一套规范化，使集合相等而顺序不同的两个段判为等价。
+const normFlags = (seg) => {
+  let out = "";
+  for (const c of ALL_FLAG_LETTERS) if (seg.includes(c)) out += c;
+  return out === ALL_FLAG_LETTERS ? "" : out;
+};
+// 已加封套的 URL：PREFIX 之后、第一个 $ 之前是标志位段。无 $ 视为形状异常（返回 null）。
+const envelopeOf = (u) => {
+  if (!u.startsWith(PREFIX)) return null;
+  const rest = u.slice(PREFIX.length);
+  const dollar = rest.indexOf("$");
+  if (dollar < 0) return { segment: null, upstream: null, valid: false };
+  const segment = rest.slice(0, dollar);
+  const valid = /^[A-Z]*$/.test(segment) && [...segment].every((c) => ALL_FLAG_LETTERS.includes(c));
+  return { segment, upstream: rest.slice(dollar + 1), valid };
+};
+const segOf = (u) => envelopeOf(u)?.segment ?? null;
+// 去封套：按第一个 `$` 剥掉完整标志位段（R8）。
+const unwrap = (u) => {
+  const rest = u.slice(PREFIX.length);
+  const dollar = rest.indexOf("$");
+  return dollar < 0 ? u : rest.slice(dollar + 1);
+};
+// 换标志位段，保留其后的上游 URL 原样。
+const reseg = (u) => {
+  const rest = u.slice(PREFIX.length);
+  const dollar = rest.indexOf("$");
+  if (dollar < 0) return u;
+  return PREFIX + wantFlags + "$" + rest.slice(dollar + 1);
+};
 
 let channels;
 try { channels = JSON.parse(process.env.CHANNELS_JSON); }
@@ -250,23 +338,69 @@ for (const c of channels) {
   if (urls.some((u) => /^wss?:\/\//i.test(u))) { add("error-websocket", "ws:// / wss:// 无法经脱敏层"); continue; }
   if (!base) { add("error-empty-url", "base_url 为空，需先在控制台写显式 URL"); continue; }
 
+  const prefixed = urls.filter((u) => u.startsWith(PREFIX));
+  const malformed = prefixed.find((u) => {
+    const envelope = envelopeOf(u);
+    return !envelope || envelope.segment === null || !envelope.upstream;
+  });
+  if (malformed) {
+    add("error-invalid-envelope", `封套缺少 $ 分界或上游 URL（${malformed}）`);
+    continue;
+  }
+  const invalidFlags = prefixed.find((u) => !envelopeOf(u).valid);
+  if (invalidFlags && !flagsSet) {
+    add("error-invalid-envelope", `封套标志位段含非法字符，未提供 --flags 无法安全修复（${invalidFlags}）`);
+    continue;
+  }
+
   if (isRestore) {
     if (!base.startsWith(PREFIX)) { add("error-not-prefixed", `未加前缀，无法回滚（${base}）`); continue; }
-    const newBase = base.slice(PREFIX.length).replace(/^\$/, "");
+    const newBase = unwrap(base);
     const newEps = eps.map((ep) => {
       const b = epBase(ep);
       return { apiFormat: epFormat(ep), path: pick(ep, "path") ?? null,
-               baseURL: b.startsWith(PREFIX) ? b.slice(PREFIX.length).replace(/^\$/, "") : (b || null),
+               baseURL: b.startsWith(PREFIX) ? unwrap(b) : (b || null),
                transport: pick(ep, "transport") ?? null };
     });
-    add("restore", `${base}  ->  ${newBase}`, { newBase, newEps, oldBase: base });
+    // 与 reflag 分支同一套 epNote 写法；只有 baseURL 真的变了的端点才打印，
+    // 未加前缀或为空的端点在回滚下保持原样，因此既有夹具输出逐字不变。
+    const epNote = eps.map((ep, i) => {
+      const ob = epBase(ep);
+      return ob && newEps[i].baseURL !== ob ? `
+      endpoint: ${ob} -> ${newEps[i].baseURL}` : "";
+    }).join("");
+    add("restore", `${base}  ->  ${newBase}${epNote}`, { newBase, newEps, oldBase: base });
     continue;
   }
 
   const allPrefixed = urls.every((u) => u.startsWith(PREFIX));
-  if (allPrefixed) { add("skip-protected", "已加前缀，幂等跳过"); continue; }
+  if (allPrefixed) {
+    // 没给 --flags 时保持原语义：已加前缀即幂等跳过，不看标志位。
+    const needsReflag = flagsSet && urls.some((u) => {
+      const envelope = envelopeOf(u);
+      return !envelope.valid || normFlags(envelope.segment) !== wantFlags;
+    });
+    if (!needsReflag) { add("skip-protected", "已加前缀，幂等跳过"); continue; }
+    const newBase = reseg(base);
+    const newEps = eps.map((ep) => {
+      const b = epBase(ep);
+      return { apiFormat: epFormat(ep), path: pick(ep, "path") ?? null,
+               baseURL: b ? reseg(b) : null, transport: pick(ep, "transport") ?? null };
+    });
+    const epNote = eps.map((ep, i) => {
+      const ob = epBase(ep);
+      return ob ? `\n      endpoint: ${ob} -> ${newEps[i].baseURL}` : "";
+    }).join("");
+    add("reflag", `${base}  ->  ${newBase}${epNote}`, { newBase, newEps, oldBase: base });
+    continue;
+  }
 
-  const wrap = (u) => (u.startsWith(PREFIX) ? u : PREFIX + "$" + u);
+  // 未给 --flags 时段为空，写出的封套与改动前逐字相同。
+  const wrapSeg = flagsSet ? wantFlags : "";
+  const wrap = (u) => {
+    if (!u.startsWith(PREFIX)) return PREFIX + wrapSeg + "$" + u;
+    return flagsSet ? reseg(u) : u;
+  };
   const newBase = wrap(base);
   const newEps = eps.map((ep) => {
     const b = epBase(ep);
@@ -279,7 +413,7 @@ for (const c of channels) {
 
 // 人类可读计划 -> stderr
 const w = (s) => process.stderr.write(s + "\n");
-const order = ["rewrite","restore","skip-protected","skip-exempt","skip-archived","skip-deleted","error-empty-url","error-websocket","error-not-prefixed"];
+const order = ["rewrite","reflag","restore","skip-protected","skip-exempt","skip-archived","skip-deleted","error-empty-url","error-websocket","error-invalid-envelope","error-not-prefixed"];
 w("");
 w(isRestore ? "回滚计划" : "改写计划");
 w("");
@@ -311,6 +445,21 @@ fi
 if [[ -n "$RESTORE_IDS" && "$YES" != "1" ]]; then
   printf '\n回滚需要显式确认：请加 --yes。\n回滚会让这些渠道恢复明文直连，隐私防护随之消失，并须在 OPERATIONS-LOG.md 记录（BR-005）。\n' >&2
   exit 1
+fi
+
+# 削弱检测（--flags 非全集）必须限定范围并显式确认：影响的是隐私防护强度，
+# 与回滚同级，因此同样要求 --yes 并提示记录 BR-005。
+if [[ "$FLAGS_SET" == "1" && -n "$FLAGS" ]]; then
+  OFF_NAMES=""
+  for (( i=0; i<${#ALL_FLAG_LETTERS}; i++ )); do
+    ch="${ALL_FLAG_LETTERS:$i:1}"
+    [[ "$FLAGS" == *"$ch"* ]] || OFF_NAMES="${OFF_NAMES}${OFF_NAMES:+、}$(flag_cn "$ch")"
+  done
+  if [[ -z "$ONLY_IDS" || "$YES" != "1" ]]; then
+    printf '\n削弱检测需要显式确认：--flags %s 会在这些渠道上关闭 %s。\n' "$FLAGS" "$OFF_NAMES" >&2
+    printf '请用 --only <id,...> 限定范围，并加 --yes 确认；变更须在 OPERATIONS-LOG.md 记录（BR-005）。\n' >&2
+    exit 1
+  fi
 fi
 
 if [[ "$APPLY" != "1" ]]; then

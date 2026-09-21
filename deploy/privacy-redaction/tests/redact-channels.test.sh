@@ -128,6 +128,138 @@ run 0 "psql 导出含 deleted_at<>0 -> skip-deleted，不进入 rewrite" --plan-
 has "skip-deleted (1)"
 has "#20 ghost"
 has "待写 0 条"
+
+printf '\n\033[1m12. --flags 标志位与带标志位封套的回滚（KTD-5）\033[0m\n'
+
+# 12.1 带标志位封套的 base 回滚 -> 还原为裸上游，箭头右侧不留标志位残段
+FR="$(fx flag-restore.json '[{"id":11,"name":"any","status":"enabled","baseURL":"http://redact:8787/PSIBEG$https://any-a.example","tags":[],"endpoints":[]}]')"
+run 1 "带标志位封套 --restore -> 还原为裸上游（缺 --yes 仍先打印计划）" --plan-from-file "$FR" --restore 11
+has 'http://redact:8787/PSIBEG$https://any-a.example  ->  https://any-a.example'
+hasnt '->  http://redact:8787/'
+
+# 12.2 端点 URL 也带标志位封套 -> base 与 endpoint 一并还原（端点行可观测）
+run 0 "端点也带标志位封套 -> base 与 endpoint 一并还原" --plan-from-file "${FIX}/channels-flagged.json" --restore 12 --yes
+has 'http://redact:8787/PSIBEG$https://ep-base.example  ->  https://ep-base.example'
+has 'endpoint: http://redact:8787/PSIBEG$https://ep-one.example -> https://ep-one.example'
+
+# 12.3 无标志位封套的回滚结果与第 8 组期望逐字相同（R8 未回归）
+FL="$(fx flagless-restore.json '[{"id":12,"name":"p","status":"enabled","baseURL":"http://redact:8787/$https://third.example/v1","tags":[],"endpoints":[]}]')"
+run 1 "无标志位封套回滚 -> 与第 8 组期望逐字相同" --plan-from-file "$FL" --restore 12
+has 'http://redact:8787/$https://third.example/v1  ->  https://third.example/v1'
+
+# 12.4 未受保护渠道 + --flags -> rewrite 直接写出带标志位的封套
+FNEW="$(fx flag-new.json '[{"id":10,"name":"a","status":"enabled","baseURL":"https://third.example/v1","tags":[],"endpoints":[]}]')"
+run 0 "--flags PSIBEG 对未受保护渠道 -> rewrite 写出带标志位封套" --plan-from-file "$FNEW" --flags PSIBEG --only 10 --yes
+has "rewrite (1)"
+has 'https://third.example/v1  ->  http://redact:8787/PSIBEG$https://third.example/v1'
+
+# 12.5 空段封套 + --flags -> reflag，只替换标志位段
+FEMPTY="$(fx reflag-empty.json '[{"id":12,"name":"p","status":"enabled","baseURL":"http://redact:8787/$https://third.example","tags":[],"endpoints":[]}]')"
+run 0 "--flags PSIBEG 对空段封套 -> reflag 只替换标志位段" --plan-from-file "$FEMPTY" --flags PSIBEG --only 12 --yes
+has "reflag (1)"
+has 'http://redact:8787/$https://third.example  ->  http://redact:8787/PSIBEG$https://third.example'
+has "待写 1 条"
+
+# 12.6 --flags 与现状等价 -> 幂等跳过，零写入
+FSAME="$(fx same-flags.json '[{"id":12,"name":"p","status":"enabled","baseURL":"http://redact:8787/PSIBEG$https://third.example","tags":[],"endpoints":[]}]')"
+run 0 "--flags 与现状等价 -> skip-protected，零写入" --plan-from-file "$FSAME" --flags PSIBEG --only 12 --yes
+has "skip-protected"
+has "待写 0 条"
+
+# 12.7 字母顺序不同但集合相等 -> 同样判为等价
+run 0 "--flags 顺序不同但集合相等 -> 仍 skip-protected" --plan-from-file "$FSAME" --flags SPIBEG --only 12 --yes
+has "skip-protected"
+has "待写 0 条"
+
+# 12.8 全集 HPSIBEG 归一为空段：是「恢复全部检测」而非削弱，无需 --yes
+run 0 "--flags HPSIBEG（全集）-> 归一为空段且无需 --yes" --plan-from-file "$FSAME" --flags HPSIBEG --only 12
+has "reflag (1)"
+has 'http://redact:8787/PSIBEG$https://third.example  ->  http://redact:8787/$https://third.example'
+
+# 12.9 削弱检测缺 --yes -> 先打印计划，再以退出码 1 拦住，并点名被关掉的检测
+run 1 "削弱检测缺 --yes -> 打印计划后退出码 1，点名关闭项并要求记录 BR-005" --plan-from-file "$FEMPTY" --flags PSIBEG --only 12
+has "改写计划"
+has "高熵检测"
+has "BR-005"
+
+# 12.10 削弱检测缺 --only -> 拒绝全库范围的削弱
+run 1 "削弱检测缺 --only -> 退出码 1，要求限定范围" --plan-from-file "$FSAME" --flags PSIBEG --yes
+has "请用 --only"
+
+# 12.11 --flags 取值校验：非法字母 / 小写都属用法错误
+run 2 "--flags 含 HPSIBEG 之外的字母 -> 退出码 2" --plan-from-file "$FSAME" --flags XYZ
+has "非法字母"
+run 2 "--flags 小写 -> 退出码 2" --plan-from-file "$FSAME" --flags psibeg
+has "只接受大写字母"
+
+# 12.12 --flags 与 --restore 语义冲突
+run 2 "--flags 与 --restore 互斥 -> 退出码 2" --plan-from-file "$FSAME" --flags PSIBEG --restore 12
+has "互斥"
+
+# 12.14 非法旧标志位有 `$` 时可由目标 flags 修复，不能被错误地视为集合等价。
+FBAD="$(fx bad-flagged.json '[{"id":12,"name":"bad","status":"enabled","baseURL":"http://redact:8787/XPSIBEG$https://third.example","tags":[],"endpoints":[]}]')"
+run 0 "非法旧标志位 + --flags -> reflag 为目标段，不得静默跳过" --plan-from-file "$FBAD" --flags PSIBEG --only 12 --yes
+has "reflag (1)"
+has 'http://redact:8787/XPSIBEG$https://third.example  ->  http://redact:8787/PSIBEG$https://third.example'
+hasnt "skip-protected"
+
+# 12.15 缺 `$` 的畸形封套没有可靠上游分界，必须阻塞而不是原样写回或跳过。
+FMAL="$(fx malformed-envelope.json '[{"id":12,"name":"malformed","status":"enabled","baseURL":"http://redact:8787/PSIBEGhttps://third.example","tags":[],"endpoints":[]}]')"
+run 1 "缺 $ 的畸形封套 -> 阻塞且零写入" --plan-from-file "$FMAL" --flags PSIBEG --only 12 --yes
+has "error-invalid-envelope"
+has "待写 0 条"
+
+# 12.16 混合状态在指定 flags 时统一到目标段：已有封套与直连 endpoint 都要收敛。
+FMIX="$(fx mixed-protection.json '[{"id":12,"name":"mixed","status":"enabled","baseURL":"http://redact:8787/$https://third.example","tags":[],"endpoints":[{"apiFormat":"anthropic","baseURL":"https://endpoint.example"}]}]')"
+run 0 "base 已封套、endpoint 直连 + --flags -> 两者统一为目标段" --plan-from-file "$FMIX" --flags PSIBEG --only 12 --yes
+has 'http://redact:8787/$https://third.example  ->  http://redact:8787/PSIBEG$https://third.example'
+has 'endpoint: https://endpoint.example -> http://redact:8787/PSIBEG$https://endpoint.example'
+
+# 12.17 所有带值选项缺参时都应立即退出，不能 shift 死循环或继续读下一选项。
+for missing in --plan-from-file --only --flags --restore; do
+  OUT="$(bash "$SCRIPT" "$missing" 2>&1)"; rc=$?
+  if [[ "$rc" == 2 ]]; then ok "$missing 缺参 -> exit=2"; else bad "$missing 缺参应 exit=2，实得 $rc"; fi
+  has "需要一个参数"
+done
+
+# 12.13 --help 覆盖新选项与新动作
+OUT="$(bash "$SCRIPT" --help 2>&1)"; rc=$?
+if [[ "$rc" == 0 ]]; then ok "--help exit=0（含新选项）"; else bad "--help 应 exit=0，实得 $rc"; fi
+has "--flags"
+has "reflag"
+
+
+printf '\n\033[1m13. 行为不变回归：不给 --flags 时与 HEAD 版逐字一致\033[0m\n'
+# Verification Contract 的「行为不变」项：--flags 是纯增量，未使用时对既有夹具的
+# 计划输出与退出码必须与 HEAD 版逐字相同。取 HEAD 版到 TMP 后同 harness 对跑。
+REPO_ROOT="$(cd "${BASE_DIR}/../.." && pwd)"
+HEAD_SCRIPT="${TMP}/head-redact-channels.sh"
+HEAD_PATH="deploy/privacy-redaction/scripts/redact-channels.sh"
+if git -C "$REPO_ROOT" show "HEAD:${HEAD_PATH}" > "$HEAD_SCRIPT" 2>/dev/null && [[ -s "$HEAD_SCRIPT" ]]; then
+  if cmp -s "$HEAD_SCRIPT" "$SCRIPT"; then
+    info "HEAD 版与工作树版字节相同，本组比对为空转（改动已提交后属正常）"
+  else
+    for fxname in channels-compliant channels-gql-shape channels-psql-softdeleted channels-violations; do
+      for mode in plan only10 restore; do
+        case "$mode" in
+          plan)    cmp_args=(--plan-from-file "${FIX}/${fxname}.json") ;;
+          only10)  cmp_args=(--plan-from-file "${FIX}/${fxname}.json" --only 10) ;;
+          restore) cmp_args=(--plan-from-file "${FIX}/${fxname}.json" --restore 1,10,11,12,26,27 --yes) ;;
+        esac
+        o="$(bash "$HEAD_SCRIPT" "${cmp_args[@]}" 2>&1)"; orc=$?
+        n="$(bash "$SCRIPT" "${cmp_args[@]}" 2>&1)"; nrc=$?
+        if [[ "$o" == "$n" && "$orc" == "$nrc" ]]; then
+          ok "${fxname} / ${mode} 与 HEAD 版逐字一致 (exit=${orc})"
+        else
+          bad "${fxname} / ${mode} 与 HEAD 版有差异 (exit old=${orc} new=${nrc})"
+          info "$(diff <(printf '%s\n' "$o") <(printf '%s\n' "$n") | head -8)"
+        fi
+      done
+    done
+  fi
+else
+  info "跳过：无法从 HEAD 取出旧版脚本（git 不可用或该路径不在版本库中）"
+fi
 printf '\n\033[1m汇总\033[0m\n  PASS %d    FAIL %d\n' "$PASS" "$FAIL"
 [[ "$FAIL" -eq 0 ]] || { printf '\n\033[31m测试未通过\033[0m\n'; exit 1; }
 printf '\n\033[32m全部通过\033[0m\n'

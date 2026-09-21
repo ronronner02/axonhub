@@ -279,6 +279,92 @@ done
 if printf '%s' "$LOG" | grep -qF '"sec-fetch-mode"'; then
   c_info "观察: 上游见到 sec-fetch-mode（已实测为 Node fetch 出站自带，非入站泄漏）"
 fi
+c_head "3b. 标志位封套对照：PSIBEG 关闭高熵检测后 metadata.user_id 原样，默认 \$ 会改写"
+
+# 形状对齐生产请求 7202：metadata.user_id 是一个 JSON 字符串，内含 64 位十六进制
+# device_id 与 UUID session_id。两个字面量是固定值（随机生成会让断言间歇失败：
+# 实测 PSIBEG 下随机 64-hex 有 299/300 原样、默认下随机 UUID 仅 292/300 被改写），
+# 已对 crg/worker.js 的 findSensitiveSpans 实测：PSIBEG 下 0 命中，默认 \$ 下命中。
+# 断言一律匹配完整占位符形状；CRG 注入的 REDACT_NOTICE 自带 "{{Redact:sha256}}"
+# 子串，只 grep 裸前缀会在零次真实脱敏时假通过。
+SESS_DEVICE="a2f8e704ecb522cd8396f97395eddacf7dbc29e90478b0a25ca93e00cc17b215"
+SESS_UUID="47f47e78-2b38-dbba-d56b-c365b5d455f3"
+
+BEFORE="$(echo_log_lines)"
+STATUS="$(in_net_node <<'JS'
+const userId = JSON.stringify({ device_id: "a2f8e704ecb522cd8396f97395eddacf7dbc29e90478b0a25ca93e00cc17b215", session_id: "47f47e78-2b38-dbba-d56b-c365b5d455f3" });
+const body = {
+  model: "redact-verify-echo",
+  max_tokens: 16,
+  metadata: { user_id: userId },
+  messages: [{ role: "user", content: [{ type: "text", text: `key is ${process.env.FAKE_KEY}` }] }]
+};
+const r = await fetch(process.env.TARGET_BASE + "/PSIBEG$http://echo:8080/v1/messages", {
+  method: "POST",
+  headers: { "content-type": "application/json" },
+  body: JSON.stringify(body)
+});
+console.log("STATUS=" + r.status);
+JS
+)" || die "3b PSIBEG 请求发送失败"
+
+[[ "$STATUS" == "STATUS=200" ]] || c_fail "3b PSIBEG 期望 200，实得 ${STATUS}"
+AFTER="$(echo_log_lines)"
+[[ "$AFTER" -gt "$BEFORE" ]] || die "3b PSIBEG 回显容器未收到请求，后续断言无意义"
+LOG_PSIBEG="$(echo_log_raw | grep '"method"' | tail -1)"
+
+if printf '%s' "$LOG_PSIBEG" | grep -qF -- "$SESS_DEVICE" \
+   && printf '%s' "$LOG_PSIBEG" | grep -qF -- "$SESS_UUID"; then
+  c_pass "3b/AE3 PSIBEG 下 device_id 与 session_id 原样到达上游（高熵检测已关闭）"
+else
+  c_fail "3b/AE3 PSIBEG 下 metadata.user_id 未原样到达上游"
+fi
+
+if printf '%s' "$LOG_PSIBEG" | grep -qF -- "$FAKE_KEY"; then
+  c_fail "3b/AE7 PSIBEG 下密钥原值泄漏到上游"
+else
+  PSIBEG_TOKENS="$(printf '%s' "$LOG_PSIBEG" | grep -oE '\{\{Redact:[a-f0-9]{64}\}\}' | grep -c . || true)"
+  if [[ "${PSIBEG_TOKENS:-0}" -ge 1 ]]; then
+    c_pass "3b/AE7 PSIBEG 下密钥仍被替换（${PSIBEG_TOKENS} 个合规占位符）"
+  else
+    c_fail "3b/AE7 PSIBEG 下未观察到合规占位符，密钥可能未被替换"
+  fi
+fi
+
+BEFORE="$(echo_log_lines)"
+STATUS="$(in_net_node <<'JS'
+const userId = JSON.stringify({ device_id: "a2f8e704ecb522cd8396f97395eddacf7dbc29e90478b0a25ca93e00cc17b215", session_id: "47f47e78-2b38-dbba-d56b-c365b5d455f3" });
+const body = {
+  model: "redact-verify-echo",
+  max_tokens: 16,
+  metadata: { user_id: userId },
+  messages: [{ role: "user", content: [{ type: "text", text: `key is ${process.env.FAKE_KEY}` }] }]
+};
+const r = await fetch(process.env.TARGET_BASE + "/$http://echo:8080/v1/messages", {
+  method: "POST",
+  headers: { "content-type": "application/json" },
+  body: JSON.stringify(body)
+});
+console.log("STATUS=" + r.status);
+JS
+)" || die "3b 默认封套请求发送失败"
+
+[[ "$STATUS" == "STATUS=200" ]] || c_fail "3b 默认封套期望 200，实得 ${STATUS}"
+AFTER="$(echo_log_lines)"
+[[ "$AFTER" -gt "$BEFORE" ]] || die "3b 默认封套回显容器未收到请求，后续断言无意义"
+LOG_DEFAULT="$(echo_log_raw | grep '"method"' | tail -1)"
+
+if printf '%s' "$LOG_DEFAULT" | grep -qF -- "$SESS_DEVICE"; then
+  c_fail "3b 默认封套下 device_id 未被改写（高熵检测应生效）"
+else
+  DEF_TOKENS="$(printf '%s' "$LOG_DEFAULT" | grep -oE '\{\{Redact:[a-f0-9]{64}\}\}' | grep -c . || true)"
+  if [[ "${DEF_TOKENS:-0}" -ge 1 ]]; then
+    c_pass "3b 默认封套下 device_id 被占位符改写，证明高熵检测是改写来源（${DEF_TOKENS} 个合规占位符）"
+  else
+    c_fail "3b 默认封套下 device_id 消失但无合规占位符，无法归因于高熵检测"
+  fi
+fi
+
 c_head "4. AE-10 助记词为已声明边界（应原样外发）"
 
 BEFORE="$(echo_log_lines)"
@@ -390,7 +476,44 @@ else
   c_fail "空正文 POST 的回显正文非空"
 fi
 
-c_head "8. 正文体积上限（重建 redact，限制为 1024 字节）"
+c_head "8. 超大 data-URI 剥离后仍完整到达上游，且正文密钥仍被替换"
+
+BEFORE="$(echo_log_lines)"
+STATUS="$(in_net_node <<'JS'
+const uri = "data:image/png;base64," + "A".repeat(6000);
+const body = {
+  model: "redact-verify-echo",
+  max_tokens: 16,
+  messages: [{
+    role: "user",
+    content: [
+      { type: "text", text: `key is ${process.env.FAKE_KEY}` },
+      { type: "image_url", image_url: uri }
+    ]
+  }]
+};
+const r = await fetch(process.env.TARGET_BASE + "/$http://echo:8080/v1/messages", {
+  method: "POST",
+  headers: { "content-type": "application/json" },
+  body: JSON.stringify(body)
+});
+console.log("STATUS=" + r.status);
+JS
+)" || die "媒体剥离请求失败"
+[[ "$STATUS" == "STATUS=200" ]] || c_fail "媒体剥离期望 200，实得 ${STATUS}"
+LOG="$(echo_log_raw | grep '"method"' | tail -1)"
+if printf '%s' "$LOG" | grep -qF -- "data:image/png;base64,AAAA"; then
+  c_pass "回显含完整 data-URI（图已拼回）"
+else
+  c_fail "回显缺少完整 data-URI"
+fi
+if printf '%s' "$LOG" | grep -qF -- "$FAKE_KEY"; then
+  c_fail "媒体请求中密钥原值泄漏到上游"
+else
+  c_pass "媒体请求中密钥未出现在上游"
+fi
+
+c_head "9. 正文体积上限（重建 redact，限制为 1024 字节）"
 
 MAX_BODY=1024 compose up -d --force-recreate redact >/dev/null 2>&1 || die "以小上限重建 redact 失败"
 READY=0

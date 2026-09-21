@@ -1,0 +1,7 @@
+[
+  {"id":1,"name":"relay-a","type":"anthropic","status":"enabled","base_url":"http://redact:8787/$https://upstream-a.example","tags":[],"endpoints":[]},
+  {"id":3,"name":"agent-claude","type":"anthropic","status":"enabled","base_url":"http://redact:8787/PSIBEG$https://agent-a.example","tags":[],"endpoints":[]},
+  {"id":11,"name":"any-claude","type":"anthropic","status":"enabled","base_url":"http://redact:8787/PSIBEG$https://any-a.example","tags":[],"endpoints":[]},
+  {"id":26,"name":"openai","type":"openai","status":"enabled","base_url":"https://api.openai.com/v1","tags":["redact-exempt"],"endpoints":[]},
+  {"id":12,"name":"ep-flagged","type":"anthropic","status":"enabled","base_url":"http://redact:8787/PSIBEG$https://ep-base.example","tags":[],"endpoints":[{"api_format":"anthropic","base_url":"http://redact:8787/PSIBEG$https://ep-one.example"}]}
+]

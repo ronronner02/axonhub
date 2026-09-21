@@ -3,8 +3,8 @@
 # 构建（在 deploy/privacy-redaction/ 下）：
 #   docker build -t axonhub-redact:local crg
 #
-# vendor 的 worker.js 零外部依赖，node-server.mjs 只用 Node 内置模块，
-# 因此没有 npm install 阶段，也不需要 package.json。
+# vendor 的 worker.js 零外部依赖。本地封装 entry.mjs / media-extract.mjs
+# 与 node-server.mjs 一样只用 Node 内置模块，因此没有 npm install，也不需要 package.json。
 #
 # BASE_IMAGE 默认按 digest 锁定，保证可复现。升级基础镜像时同步更新此处并重跑验收。
 #
@@ -19,10 +19,10 @@ FROM ${BASE_IMAGE}
 # 以镜像自带的非 root 用户 node(1000) 运行。
 WORKDIR /app
 
-COPY --chown=root:root worker.js node-server.mjs LICENSE ./
+COPY --chown=root:root worker.js node-server.mjs LICENSE entry.mjs media-extract.mjs ./
 
 # 只读根文件系统由 compose 施加；这里确保应用文件对运行用户不可写。
-RUN chmod 0444 worker.js node-server.mjs LICENSE
+RUN chmod 0444 worker.js node-server.mjs LICENSE entry.mjs media-extract.mjs
 
 USER node
 
@@ -33,4 +33,5 @@ ENV HOST=0.0.0.0 \
 EXPOSE 8787
 
 # 不使用 shell 形式，避免多一层进程妨碍信号传递。
-CMD ["node", "node-server.mjs"]
+# entry.mjs 是本地封装：parse 前剥离超大媒体字符串，再交给未改动的 vendor worker.js。
+CMD ["node", "entry.mjs"]

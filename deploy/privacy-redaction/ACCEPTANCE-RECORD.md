@@ -86,3 +86,31 @@ P0 相关项（AE-01～AE-06、AE-08～AE-10）必须全部通过才算验收完
 | CRG 注入的英文 notice 是否影响回答质量 | AE-02/09 未见异常；AE-11 中模型 thinking 明确意识到“token is redacted”，属预期 | requests#6571 |
 | 高熵误报是否替换掉代码中的哈希/ID | 阶段 2 编码类提示未做专项；真实使用中观察 | 后续 |
 | 大文件工具结果（≥1 MiB）往返 | 通过：1,080,326 B tool_result 经 ch10 往返 200，16.0s | requests#6572 |
+
+---
+
+## 受限上游别名（2026-09）
+
+本轮针对 anyrouter 渠道 11/12/13 与 agentrouter 渠道 3/8：降级封套 `PSIBEG$`（关闭高熵检测、
+其余检测保留）、三个专用模型别名、agentrouter 的 User-Agent 透传。操作步骤见 `README.md` 第 11 节。
+
+结论填 `通过` / `不通过` / `未执行`。P0 项为 AE1、AE2、AE4、AE5、AE6，必须全部通过；
+AE3、AE7 至少要有机制层证据（本地冒烟 `scripts/smoke-local.sh` 的 3b 段）。
+
+| AE | 需求 | 结论 | 日期 | 证据位置 | 备注 |
+| --- | --- | --- | --- | --- | --- |
+| AE1 | R1、R2、R3、R4、R10 别名经 anyrouter 得到正常补全 | 不通过 | 2026-09-18 | requests#17469；request_executions#55178–55186 | 单次客户端请求返回 HTTP 503 / Anthropic `api_error`；默认 retry 产生 9 次执行，channels 11/12/13 各 3 次且全部 503。按停止条件未循环发送新请求 |
+| AE2 | R3 出站模型名不带 `[1m]` | 通过 | 2026-09-18 | request_executions#55178–55186 | 9 次执行的 `request_body->>'model'` 全部为 `claude-fable-5-1`，证明专用别名到裸上游模型名的改写正确 |
+| AE3 | R4 `metadata.user_id` 未被改写 | 不通过 | 2026-09-18 | requests#17469；request_executions#55178–55186；本地 smoke 3b | 入站和 9 次出站记录均保持 UUID `123e4567-e89b-12d3-a456-426614174000`，机制层通过；但上游未返回 200，服务器行为层判据未关闭 |
+| AE4 | R5 agentrouter 过 UA 门禁 | 未执行 | 2026-09-18 | AE1 停止条件 | 渠道 3/8 已确认 `passThroughUserAgent=true`；因 AE1 失败，按计划未继续发送 agentrouter provider 探测，不能宣称已越过 401 门禁 |
+| AE5 | R7 信任边界核对 | 通过 | 2026-09-18 | 服务器 `check-trust-boundary.sh` 终态输出 | 23 个受保护渠道；降级封套恰为 #3/#8/#11/#12/#13 且均为 `PSIBEG`；豁免仅 #26；违规 0；10 个允许主机与当前渠道集合一致 |
+| AE6 | R8 带标志位封套可正确回滚 | 通过 | 2026-09-18 | 服务器 `redact-channels.sh --restore 11` dry-run | 计划行精确显示 `http://redact:8787/PSIBEG$https://anyrouter.top -> https://anyrouter.top`；待写 1、阻塞 0；未加 `--apply` |
+| AE7 | R6 密钥仍被替换、回程仍还原 | 未执行 | 2026-09-18 | 本地 smoke 3b；AE1 停止条件 | 本地 Docker 冒烟已证明 `PSIBEG` 下 Secret 检测与回程还原机制；因 AE1 失败，未继续发送真实 anyrouter 密钥往返探测 |
+
+失败处理：AE1 失败即停在该步，把该次执行的出站正文与请求头特征写入本表备注后回到 owner，
+不要循环探测——默认重试策略下一次彻底失败最多打 9 次上游，anyrouter 会把拒绝也计入探测。
+
+本轮结论：U5 服务器配置终态已成立，但 U6 未完成。P0 中 AE2、AE5、AE6 通过，AE1 不通过，
+AE4 未执行；因此不能宣称受限 Claude relay 已恢复。容器健康与网关 `/health` 200 只证明本地服务链路，
+不替代 provider generation 成功。所用本地脚本基线为 `79fdf4b4` 加当前未提交 privacy-redaction 修复；
+服务器运行副本于 2026-09-18 通过 SHA-256 一致的 staging 包同步。
