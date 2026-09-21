@@ -1,0 +1,10 @@
+# Keep governance, plans, operational scripts, and durable learnings reviewable.
+.gitignore text eol=lf
+.gitattributes text eol=lf
+AGENTS.md text eol=lf
+CLAUDE.md text eol=lf
+.agent/rules/workflows/*.md text eol=lf
+deploy/privacy-redaction/** text eol=lf
+docs/plans/** text eol=lf
+docs/brainstorms/** text eol=lf
+docs/solutions/** text eol=lf
