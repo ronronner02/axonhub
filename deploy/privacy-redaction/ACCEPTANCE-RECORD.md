@@ -114,3 +114,25 @@ AE3、AE7 至少要有机制层证据（本地冒烟 `scripts/smoke-local.sh` �
 AE4 未执行；因此不能宣称受限 Claude relay 已恢复。容器健康与网关 `/health` 200 只证明本地服务链路，
 不替代 provider generation 成功。所用本地脚本基线为 `79fdf4b4` 加当前未提交 privacy-redaction 修复；
 服务器运行副本于 2026-09-18 通过 SHA-256 一致的 staging 包同步。
+
+---
+
+## 上游控制字段豁免 / gpt-6-astra 400 修复（2026-09）
+
+背景：agentrouter 的 `gpt-6-astra`（模型条目 id 20，关联渠道 2/9/15/16/30）经 Codex 的
+`openai/responses` 链路出站时，CRG 的高熵检测把客户端自带的 UUID 型 `prompt_cache_key`
+改写成 99 字符的 `{{Redact:<64hex>}}` 占位符，超过上游 64 字符上限，被 `400` 拒绝。
+修复见 `crg/UPSTREAM.md` 的「控制字段保护」一节。
+
+| 检查 | 需求 | 结论 | 日期 | 证据位置 | 备注 |
+| --- | --- | --- | --- | --- | --- |
+| AE-C1 | 控制字段原样送达上游 | 通过 | 2026-09-21 | 候选容器回显探针 | UUID 型 `prompt_cache_key` 经 `$` 全检测封套后原样到达上游，长度 36（≤64）；对照旧镜像同一请求长度 99 且被改写，复现了 400 根因 |
+| AE-C2 | 豁免不削弱其余脱敏 | 通过 | 2026-09-21 | 同一探针请求 | 同请求正文内的假密钥仍被替换为占位符，回程仍还原；豁免只按键名生效，与值大小 / 熵无关 |
+| AE-C3 | 豁免不依赖媒体开关 | 通过 | 2026-09-21 | `tests/media-extract.test.mjs` | `REDACT_MEDIA_EXTRACT=0` 时控制字段仍受保护；本机 `node --test` 27/27 通过（含「占位符本身低熵、不会被二次改写」与「UUID 型 key 送达长度 ≤64」两条回归守卫） |
+| AE-C4 | vendor 未改 | 通过 | 2026-09-21 | `sha256sum` | 运行容器与 build-context 的 `worker.js` 均为 `23fabf64`，与 `SHA256SUMS` 一致；豁免全部落在本地封装 |
+| AE-C5 | 生产链路 400 消失 | 通过 | 2026-09-22 | `request_executions`（只读） | 切换后近 2 小时 `gpt-6-astra` 的 400 `prompt_cache_key` 计数为 0（总执行 7 / 成功 4）；切换前同类报错稳定复现 |
+| AE-C6 | 核心服务未中断 | 通过 | 2026-09-22 | `docker ps` | 零停机 alias 重叠切换；`axonhub-app` / `axonhub-gateway` / `axonhub-postgres` 保持 Up 3 weeks (healthy)，owner 会话未掉线 |
+
+边界：anyrouter 侧渠道 15/16 的 `500/503 当前模型 gpt-6-astra 负载已经达到上限` 属上游负载，
+不在本次修复范围，代码层无法消除。控制字段豁免的安全含义（三个键的值原样送达上游、
+绕过脱敏）已记入 `crg/UPSTREAM.md`，需要收窄或扩充时改 `CONTROL_KEYS` 一处并补回归测试。
