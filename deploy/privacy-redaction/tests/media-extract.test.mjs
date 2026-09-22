@@ -250,6 +250,36 @@ test("控制字段测试常量确实会触发 CRG 熵门（守卫的前提）", 
   assert.ok(isHighEntropyBlock(TRIP_TAIL), "末段 hex 必须高熵，否则本组用例无法证明保护有效");
 });
 
+test("reasoning.encrypted_content 原样保留并可无损拼回", () => {
+  const encrypted = "gAAAAAB" + "Aa9fK2mQ7xP4vN8cR1sT6uY3wZ0bC5dE".repeat(24);
+  const json = JSON.stringify({
+    model: "gpt-6-astra",
+    input: [{ type: "reasoning", encrypted_content: encrypted, summary: [] }],
+  });
+  const extracted = extractProtectedSpans(json, { id: "ee11aa22" });
+  assert.equal(extracted.spans.length, 1);
+  assert.equal(extracted.text.includes(encrypted), false, "加密思维链不得进入脱敏器");
+  assert.equal(restoreSpans(extracted.text, extracted), json);
+});
+
+test("dispatch：reasoning.encrypted_content 原样送达上游", async () => {
+  const encrypted = "gAAAAAB" + "Aa9fK2mQ7xP4vN8cR1sT6uY3wZ0bC5dE".repeat(24);
+  const json = JSON.stringify({
+    model: "gpt-6-astra",
+    input: [{ type: "reasoning", encrypted_content: encrypted, summary: [] }],
+  });
+  let upstreamBody = "";
+  const res = await dispatch(
+    new Request("http://redact:8787/$http://echo.example/v1/responses", {
+      method: "POST", headers: { "content-type": "application/json" }, body: json,
+    }),
+    { REDACT_ALLOWED_HOSTS: "echo.example" },
+    { fetchImpl: async (_url, init) => { upstreamBody = init.body; return new Response("{}", { headers: { "content-type": "application/json" } }); } },
+  );
+  assert.equal(res.status, 200);
+  assert.equal(JSON.parse(upstreamBody).input[0].encrypted_content, encrypted);
+  assert.equal(/\{\{Redact:[a-f0-9]{64}\}\}/.test(upstreamBody), false);
+});
 test("extractProtectedSpans 抠出控制字段并可无损拼回（与大小无关）", () => {
   const json = JSON.stringify({
     model: "gpt-6-astra",

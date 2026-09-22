@@ -18,6 +18,7 @@ export const CONTROL_KEYS = new Set([
   "prompt_cache_key",
   "previous_response_id",
   "safety_identifier",
+  "encrypted_content",
 ]);
 
 function controlPath(path) {

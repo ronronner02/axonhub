@@ -90,12 +90,12 @@ CRG 的通用检测器按 `[A-Za-z0-9]+` 切块后，UUID 末段 12 位 hex 会�
 | `prompt_cache_key` | 上游提示缓存键 | 被改写→超 64 上限→400；缓存失效 |
 | `previous_response_id` | Responses 会话链接（`resp_…`） | 被改写→上游找不到上一条响应→会话断链 |
 | `safety_identifier` | 上游滥用检测标识 | 被改写→标识漂移 |
+| `encrypted_content` | Responses reasoning 加密内容 | 被改写→上游解密失败或 400 |
 
-**权衡（安全含义，需知悉）：** 这三个键的值会**原样**送达上游，绕过脱敏。它们本应是
+**权衡（安全含义，需知悉）：** 这四个键的值会**原样**送达上游，绕过脱敏。它们本应是
 客户端生成的随机/不透明标识，不含用户内容；但若上游把敏感信息塞进这些字段，将不再被
 脱敏。需要收窄/扩充范围时改 `CONTROL_KEYS` 一处即可，并补 `tests/media-extract.test.mjs`。
-控制保护**不依赖** `REDACT_MEDIA_EXTRACT` 开关（即便关闭媒体剥离仍生效），因为这几个
-字段无论媒体如何处理都会被通用检测器改写。
+控制保护**不依赖** `REDACT_MEDIA_EXTRACT` 开关（即便关闭媒体剥离仍生效），因为这些字段无论媒体如何处理都会被通用检测器改写。
 
 **为何走 wrapper 而非改 vendor `CONTROL_KEYS`：** 与「注入文案」那条已知限制同理 —— 改
 vendor 会破坏「原样复制、可对照上游」的约束并需维护 `SHA256SUMS`。wrapper 方案在升级 CRG

@@ -92,8 +92,8 @@ export async function dispatch(request, env = process.env, options = {}) {
   // Lift out large media (size-based, toggleable via REDACT_MEDIA_EXTRACT) AND
   // upstream control identifiers (always on) before the vendor redactor runs,
   // then splice the originals back before forwarding. Control protection must
-  // not depend on the media toggle: prompt_cache_key / previous_response_id /
-  // safety_identifier are rewritten by CRG's generic detectors regardless of
+  // not depend on the media toggle: prompt_cache_key / previous_response_id / safety_identifier /
+  // encrypted_content are rewritten by CRG's generic detectors regardless of
   // media handling, which breaks upstream contracts (see media-extract.mjs).
   const text = new TextDecoder().decode(bytes);
   const extracted = extractProtectedSpans(text, {
