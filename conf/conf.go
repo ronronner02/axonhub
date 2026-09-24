@@ -28,17 +28,18 @@ import (
 type Config struct {
 	fx.Out `yaml:"-" json:"-"`
 
-	DB               db.Config           `conf:"db" yaml:"db" json:"db"`
-	Log              log.Config          `conf:"log" yaml:"log" json:"log"`
-	APIServer        server.Config       `conf:"server" yaml:"server" json:"server"`
-	Metrics          metrics.Config      `conf:"metrics" yaml:"metrics" json:"metrics"`
-	GC               gc.Config           `conf:"gc" yaml:"gc" json:"gc"`
-	Cache            xcache.Config       `conf:"cache" yaml:"cache" json:"cache"`
-	ProviderQuota    providerQuotaConfig `conf:"provider_quota" yaml:"provider_quota" json:"provider_quota"`
-	OIDC             biz.OIDCConfig      `conf:"oidc" yaml:"oidc" json:"oidc"`
-	DisableSSLVerify bool                `name:"disable_ssl_verify" yaml:"-" json:"-"`
-	AllowNoAuth      bool                `name:"allow_no_auth" yaml:"-" json:"-"`
-	APIKeyPrefix     string              `name:"api_key_prefix" yaml:"-" json:"-"`
+	DB               db.Config               `conf:"db" yaml:"db" json:"db"`
+	Log              log.Config              `conf:"log" yaml:"log" json:"log"`
+	APIServer        server.Config           `conf:"server" yaml:"server" json:"server"`
+	Metrics          metrics.Config          `conf:"metrics" yaml:"metrics" json:"metrics"`
+	GC               gc.Config               `conf:"gc" yaml:"gc" json:"gc"`
+	Cache            xcache.Config           `conf:"cache" yaml:"cache" json:"cache"`
+	ProviderQuota    providerQuotaConfig     `conf:"provider_quota" yaml:"provider_quota" json:"provider_quota"`
+	OIDC             biz.OIDCConfig          `conf:"oidc" yaml:"oidc" json:"oidc"`
+	Compatibility    biz.CompatibilityConfig `conf:"compatibility" yaml:"compatibility" json:"compatibility"`
+	DisableSSLVerify bool                    `name:"disable_ssl_verify" yaml:"-" json:"-"`
+	AllowNoAuth      bool                    `name:"allow_no_auth" yaml:"-" json:"-"`
+	APIKeyPrefix     string                  `name:"api_key_prefix" yaml:"-" json:"-"`
 }
 
 type providerQuotaConfig struct {
@@ -212,6 +213,9 @@ func customizedDecodeHook(srcType reflect.Type, dstType reflect.Type, data any) 
 
 // setDefaults sets default configuration values.
 func setDefaults(v *viper.Viper) {
+	v.SetDefault("compatibility.invalid_encrypted_content_recovery", false)
+	v.SetDefault("compatibility.anthropic_stream_recovery_channels", []string{})
+
 	// Server defaults
 	v.SetDefault("server.host", "0.0.0.0")
 	v.SetDefault("server.port", 8090)

@@ -317,6 +317,7 @@ type PersistentOutboundTransformer struct {
 	wrapped                       transformer.Outbound
 	state                         *PersistenceState
 	outboundLlmRequestMiddlewares []pipeline.OutboundLlmRequestMiddleware
+	reasoningRecovery             reasoningRecovery
 }
 
 func shouldForceStreamingForCandidate(candidate *ChannelModelsCandidate, req *llm.Request) bool {
@@ -355,10 +356,14 @@ func (p *PersistentOutboundTransformer) APIFormat() llm.APIFormat {
 }
 
 func (p *PersistentOutboundTransformer) TransformError(ctx context.Context, rawErr *httpclient.Error) *llm.ResponseError {
+	p.reasoningRecovery.observeError(rawErr)
 	return p.wrapped.TransformError(ctx, rawErr)
 }
 
 func (p *PersistentOutboundTransformer) TransformRequest(ctx context.Context, llmRequest *llm.Request) (*httpclient.Request, error) {
+	p.reasoningRecovery.pending = false
+	p.reasoningRecovery.request = nil
+
 	// Candidates should already be selected by inbound transformer
 	if len(p.state.ChannelModelsCandidates) == 0 {
 		return nil, errors.New("no candidates available: candidates should be selected by inbound transformer")
@@ -555,6 +560,9 @@ func (p *PersistentOutboundTransformer) resetPassThroughStreamState() {
 // NextChannel moves to the next available candidate for retry.
 // It implements the pipeline.Retryable interface.
 func (p *PersistentOutboundTransformer) NextChannel(ctx context.Context) error {
+	p.reasoningRecovery.pending = false
+	p.reasoningRecovery.request = nil
+
 	// Cancel any in-flight pass-through stream goroutine from the previous attempt
 	// so it exits promptly and releases its upstream HTTP connection.
 	p.resetPassThroughStreamState()
@@ -612,6 +620,10 @@ func (p *PersistentOutboundTransformer) CanRetry(err error) bool {
 		return false
 	}
 
+	if p.reasoningRecovery.pending {
+		return true
+	}
+
 	// Empty response detection: allow same-channel retry so the pipeline can
 	// re-execute the request against the same (or next model in the) channel.
 	if errors.Is(err, pipeline.ErrEmptyResponse) ||
@@ -650,7 +662,7 @@ func (p *PersistentOutboundTransformer) CanRetry(err error) bool {
 
 // PrepareForRetry implements the pipeline.ChannelRetryable interface.
 // This will reset the request execution for the same channel, so that the same request can be retried.
-// It will try the next model in the same channel if available.
+// 普通重试会尝试同渠道的下一个模型；失效密文恢复保留当前模型。
 func (p *PersistentOutboundTransformer) PrepareForRetry(ctx context.Context) error {
 	candidate := p.state.CurrentCandidate
 
@@ -661,6 +673,16 @@ func (p *PersistentOutboundTransformer) PrepareForRetry(ctx context.Context) err
 	// Cancel any in-flight pass-through stream goroutine from the previous attempt
 	// so it exits promptly and releases its upstream HTTP connection.
 	p.resetPassThroughStreamState()
+
+	if p.reasoningRecovery.pending {
+		p.reasoningRecovery.pending = false
+		p.reasoningRecovery.used = true
+		log.Info(ctx, "剥离失效 reasoning 历史后重试当前模型",
+			log.Int("channel_id", candidate.Channel.ID),
+			log.String("model_id", p.GetCurrentModelID()),
+		)
+		return nil
+	}
 
 	// If there's another model in the list, advance to it.
 	if p.state.CurrentModelIndex+1 < len(candidate.Models) {

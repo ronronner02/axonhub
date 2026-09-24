@@ -238,6 +238,7 @@ func (processor *ChatCompletionOrchestrator) Process(ctx context.Context, reques
 	middlewares = append(middlewares, processor.Middlewares...)
 
 	inbound, outbound := NewPersistentTransformers(state, processor.Inbound, processor.Middlewares...)
+	outbound.reasoningRecovery.enabled = processor.SystemService.CompatibilityConfig.InvalidEncryptedContentRecovery
 
 	// Add inbound middlewares (executed after inbound.TransformRequest)
 	middlewares = append(middlewares,
@@ -268,6 +269,8 @@ func (processor *ChatCompletionOrchestrator) Process(ctx context.Context, reques
 		// This allows override headers to modify the User-Agent if configured.
 		applyUserAgentPassThrough(outbound, processor.SystemService),
 		applyOverrideRequestHeaders(outbound),
+		applyReasoningRecovery(outbound),
+		guardClaudeCLIContinuation(outbound, processor.SystemService.CompatibilityConfig),
 
 		// Unified performance tracking middleware.
 		withPerformanceRecording(outbound),
@@ -289,12 +292,11 @@ func (processor *ChatCompletionOrchestrator) Process(ctx context.Context, reques
 		withRateLimitAdmission(outbound, processor.rateLimitTracker),
 		// Rate limit tracking middleware for TPM and provider cooldown signals.
 		withRateLimitTracking(outbound, processor.rateLimitTracker),
-
-		// Response pass-through capture middlewares must be last in the outbound list
-		// so they run first in reverse order (before any other OnOutboundRawResponse/OnOutboundRawStream handlers).
-		captureRawProviderResponse(outbound, processor.SystemService),
-		captureRawProviderStream(outbound, processor.SystemService),
 	)
+
+	// 原始响应捕获中间件按逆序较早执行。Anthropic 修复注册在捕获器之后，
+	// 以便先包裹上游流，让转换管线和原始透传都收到同一份修复事件。
+	middlewares = append(middlewares, rawProviderCaptureMiddlewares(outbound, processor.SystemService)...)
 
 	pipelineOpts = append(pipelineOpts, pipeline.WithMiddlewares(middlewares...))
 
