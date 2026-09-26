@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync/atomic"
 	"time"
 
 	"github.com/samber/lo"
@@ -318,6 +319,8 @@ type PersistentOutboundTransformer struct {
 	state                         *PersistenceState
 	outboundLlmRequestMiddlewares []pipeline.OutboundLlmRequestMiddleware
 	reasoningRecovery             reasoningRecovery
+	claudeCLIStreamContinuation   bool
+	claudeCLIContinuationUsed     atomic.Bool
 }
 
 func shouldForceStreamingForCandidate(candidate *ChannelModelsCandidate, req *llm.Request) bool {
@@ -752,7 +755,16 @@ func (p *PersistentOutboundTransformer) CustomizeExecutor(executor pipeline.Exec
 		outbound = channel.Outbound
 	}
 	if custom, ok := outbound.(pipeline.ChannelCustomizedExecutor); ok {
-		return custom.CustomizeExecutor(customizedExecutor)
+		customizedExecutor = custom.CustomizeExecutor(customizedExecutor)
+	}
+
+	if p.claudeCLIStreamContinuation {
+		customizedExecutor = &claudeCLIContinuationExecutor{
+			Executor:    customizedExecutor,
+			used:        &p.claudeCLIContinuationUsed,
+			channelID:   channel.ID,
+			channelName: channel.Name,
+		}
 	}
 
 	return customizedExecutor

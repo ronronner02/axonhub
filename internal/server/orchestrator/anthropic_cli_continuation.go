@@ -16,12 +16,15 @@ const claudeCLIContinuationInstruction = "When working on a task, do not end you
 // 只在目标渠道的 Claude Code 请求中追加指令；保留原有 system 块及缓存标记。
 func guardClaudeCLIContinuation(outbound *PersistentOutboundTransformer, config biz.CompatibilityConfig) pipeline.Middleware {
 	return pipeline.OnRawRequest("claude-cli-continuation", func(_ context.Context, request *httpclient.Request) (*httpclient.Request, error) {
+		outbound.claudeCLIStreamContinuation = false
 		channel := outbound.GetCurrentChannel()
-		if channel == nil || !config.AnthropicStreamRecoveryEnabledFor(channel.ID, channel.Name) ||
+		if request == nil || channel == nil || !config.AnthropicStreamRecoveryEnabledFor(channel.ID, channel.Name) ||
 			request.APIFormat != llm.APIFormatAnthropicMessage.String() ||
 			!isClaudeCLIRequest(outbound.state.LlmRequest) {
 			return request, nil
 		}
+
+		outbound.claudeCLIStreamContinuation = true
 
 		var body map[string]json.RawMessage
 		if err := json.Unmarshal(request.Body, &body); err != nil || body == nil {
@@ -55,6 +58,8 @@ func guardClaudeCLIContinuation(outbound *PersistentOutboundTransformer, config 
 		updated := *request
 		updated.Body = encoded
 		updated.JSONBody = nil
+		updated.Headers = request.Headers.Clone()
+		updated.Headers.Del("Content-Length")
 		outbound.state.RawProviderRequest = &updated
 
 		return &updated, nil

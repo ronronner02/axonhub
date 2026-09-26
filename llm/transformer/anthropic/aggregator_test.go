@@ -1018,3 +1018,20 @@ func TestAggregateStreamChunks_WithTestData(t *testing.T) {
 		})
 	}
 }
+
+func TestAggregateStreamChunks_CumulativeCacheTTLUsage(t *testing.T) {
+	chunks := []*httpclient.StreamEvent{
+		{Data: []byte(`{"type":"message_start","message":{"id":"msg_cache","type":"message","role":"assistant","model":"fixture","content":[],"usage":{"input_tokens":100,"output_tokens":1,"cache_creation_input_tokens":30,"cache_creation":{"ephemeral_5m_input_tokens":30}}}}`)},
+		{Data: []byte(`{"type":"message_delta","delta":{},"usage":{"input_tokens":200,"output_tokens":21,"cache_creation_input_tokens":100,"cache_creation":{"ephemeral_1h_input_tokens":70}}}`)},
+		{Data: []byte(`{"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":40,"cache_creation_input_tokens":120,"cache_creation":{"ephemeral_5m_input_tokens":50}}}`)},
+		{Data: []byte(`{"type":"message_stop"}`)},
+	}
+	body, meta, err := AggregateStreamChunks(t.Context(), chunks, PlatformDirect)
+	require.NoError(t, err)
+	var message Message
+	require.NoError(t, json.Unmarshal(body, &message))
+	require.Equal(t, int64(50), message.Usage.CacheCreation.Ephemeral5mInputTokens)
+	require.Equal(t, int64(70), message.Usage.CacheCreation.Ephemeral1hInputTokens)
+	require.Equal(t, int64(50), meta.Usage.PromptTokensDetails.WriteCached5MinTokens)
+	require.Equal(t, int64(70), meta.Usage.PromptTokensDetails.WriteCached1HourTokens)
+}

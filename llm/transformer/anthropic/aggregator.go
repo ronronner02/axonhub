@@ -161,6 +161,14 @@ func AggregateStreamChunks(ctx context.Context, chunks []*httpclient.StreamEvent
 					if event.Usage.CacheReadInputTokens > 0 {
 						usage.CacheReadInputTokens = event.Usage.CacheReadInputTokens
 					}
+
+					// 终段可能补充累计缓存 TTL 用量；缺失的字段保留前段值。
+					if event.Usage.CacheCreation.Ephemeral5mInputTokens > 0 {
+						usage.CacheCreation.Ephemeral5mInputTokens = event.Usage.CacheCreation.Ephemeral5mInputTokens
+					}
+					if event.Usage.CacheCreation.Ephemeral1hInputTokens > 0 {
+						usage.CacheCreation.Ephemeral1hInputTokens = event.Usage.CacheCreation.Ephemeral1hInputTokens
+					}
 				}
 			}
 		case "content_block_stop":
