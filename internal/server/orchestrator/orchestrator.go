@@ -239,6 +239,7 @@ func (processor *ChatCompletionOrchestrator) Process(ctx context.Context, reques
 
 	inbound, outbound := NewPersistentTransformers(state, processor.Inbound, processor.Middlewares...)
 	outbound.reasoningRecovery.enabled = processor.SystemService.CompatibilityConfig.InvalidEncryptedContentRecovery
+	outbound.reasoningRecovery.opaque400Channels = processor.SystemService.CompatibilityConfig.ResponsesOpaque400RecoveryChannels
 
 	// Add inbound middlewares (executed after inbound.TransformRequest)
 	middlewares = append(middlewares,

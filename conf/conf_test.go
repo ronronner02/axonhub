@@ -165,3 +165,35 @@ func TestAnthropicStreamRecoveryChannelsConfig(t *testing.T) {
 		})
 	}
 }
+
+func TestResponsesOpaque400RecoveryChannelsConfig(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		yaml string
+		env  string
+		want []string
+	}{
+		{name: "default_disabled", want: []string{}},
+		{
+			name: "yaml_enabled",
+			yaml: "compatibility:\n  responses_opaque_400_recovery_channels:\n    - linxi\n    - 100x\n",
+			want: []string{"linxi", "100x"},
+		},
+		{
+			name: "env_enabled",
+			env:  `["17","18"]`,
+			want: []string{"17", "18"},
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("AXONHUB_COMPATIBILITY_RESPONSES_OPAQUE_400_RECOVERY_CHANNELS", tt.env)
+			cfg, _, err := loadConfig(writeTestConfig(t, tt.yaml))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(cfg.Compatibility.ResponsesOpaque400RecoveryChannels, tt.want) {
+				t.Fatalf("ResponsesOpaque400RecoveryChannels = %#v, want %#v", cfg.Compatibility.ResponsesOpaque400RecoveryChannels, tt.want)
+			}
+		})
+	}
+}

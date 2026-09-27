@@ -969,11 +969,11 @@ func TestOutboundTransformer_TransformStream_PreservesPreviousResponseID(t *test
 // Completions finish_reason must reflect that instead of defaulting to stop.
 func TestOutboundTransformer_TransformStream_MapsCompletedStatusToFinishReason(t *testing.T) {
 	tests := []struct {
-		name            string
-		status          string
+		name             string
+		status           string
 		incompleteReason string
-		expectedReason  string
-		withToolCalls   bool
+		expectedReason   string
+		withToolCalls    bool
 	}{
 		{name: "incomplete maps to length", status: "incomplete", expectedReason: "length"},
 		{name: "incomplete with content_filter reason maps to content_filter", status: "incomplete", incompleteReason: "content_filter", expectedReason: "content_filter"},
@@ -1018,6 +1018,12 @@ func TestOutboundTransformer_TransformStream_MapsCompletedStatusToFinishReason(t
 			require.NoError(t, err)
 
 			responses, err := streams.All(stream)
+			if tt.status == "failed" {
+				var upstream *llm.ResponseError
+				require.ErrorAs(t, err, &upstream)
+				require.NotContains(t, responses, llm.DoneResponse)
+				return
+			}
 			require.NoError(t, err)
 
 			var finishReasons []string

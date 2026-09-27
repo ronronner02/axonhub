@@ -825,7 +825,15 @@ func (s *RequestService) UpdateRequestExecutionStatusFromError(ctx context.Conte
 		status = requestexecution.StatusCanceled
 	}
 
-	return s.UpdateRequestExecutionStatus(ctx, executionID, status, rawErr.Error(), nil)
+	var statusCode *int
+	var responseErr *llm.ResponseError
+	var httpErr *httpclient.Error
+	if errors.As(rawErr, &responseErr) && responseErr.StatusCode > 0 {
+		statusCode = &responseErr.StatusCode
+	} else if errors.As(rawErr, &httpErr) && httpErr.StatusCode > 0 {
+		statusCode = &httpErr.StatusCode
+	}
+	return s.UpdateRequestExecutionStatus(ctx, executionID, status, rawErr.Error(), &ExecutionErrorInfo{StatusCode: statusCode})
 }
 
 type jsonStreamEvent struct {

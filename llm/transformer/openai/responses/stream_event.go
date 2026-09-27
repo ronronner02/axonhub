@@ -1,6 +1,9 @@
 package responses
 
-import "encoding/json"
+import (
+	"encoding/json"
+	"github.com/looplj/axonhub/llm"
+)
 
 // StreamEventType defines the type of streaming events for the OpenAI Responses API.
 type StreamEventType string
@@ -106,9 +109,10 @@ type StreamEvent struct {
 	PartialImageIndex *int   `json:"partial_image_index,omitempty"`
 
 	// For error events
-	Code    string  `json:"code,omitempty"`
-	Message string  `json:"message,omitempty"`
-	Param   *string `json:"param,omitempty"`
+	Error   *llm.ErrorDetail `json:"error,omitempty"`
+	Code    string           `json:"code,omitempty"`
+	Message string           `json:"message,omitempty"`
+	Param   *string          `json:"param,omitempty"`
 }
 
 // StreamEventContentPart represents a content part in streaming events.

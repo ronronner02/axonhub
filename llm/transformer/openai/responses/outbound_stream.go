@@ -96,6 +96,9 @@ func (s *responsesOutboundStream) enqueue(resp *llm.Response) {
 }
 
 func (s *responsesOutboundStream) Next() bool {
+	if s.err != nil {
+		return false
+	}
 	// If we have events in the queue, return them first
 	if s.queueIndex < len(s.eventQueue) {
 		return true
@@ -158,6 +161,13 @@ func (s *responsesOutboundStream) transformStreamChunk(event *httpclient.StreamE
 
 	if slog.Default().Enabled(context.Background(), slog.LevelDebug) {
 		slog.DebugContext(context.Background(), "received response stream event", slog.Any("event", streamEvent))
+	}
+
+	if streamEvent.Type == "" {
+		streamEvent.Type = StreamEventType(event.Type)
+	}
+	if streamEvent.Response != nil && streamEvent.Response.Status != nil && *streamEvent.Response.Status == "failed" {
+		return responseStreamError(&streamEvent)
 	}
 
 	// Build base response
@@ -660,15 +670,7 @@ func (s *responsesOutboundStream) transformStreamChunk(event *httpclient.StreamE
 		}
 
 	case StreamEventTypeResponseFailed:
-		// Response failed
-		s.responseCompleted = true
-		finishReason := "error"
-		resp.Choices = []llm.Choice{
-			{
-				Index:        0,
-				FinishReason: &finishReason,
-			},
-		}
+		return responseStreamError(&streamEvent)
 
 	case StreamEventTypeResponseIncomplete:
 		// Response incomplete (e.g., max tokens)
@@ -693,13 +695,7 @@ func (s *responsesOutboundStream) transformStreamChunk(event *httpclient.StreamE
 		}
 
 	case StreamEventTypeError:
-		return &llm.ResponseError{
-			Detail: llm.ErrorDetail{
-				Code:    streamEvent.Code,
-				Message: streamEvent.Message,
-				Param:   lo.FromPtr(streamEvent.Param),
-			},
-		}
+		return responseStreamError(&streamEvent)
 
 	case StreamEventTypeImageGenerationPartialImage,
 		StreamEventTypeImageGenerationGenerating,

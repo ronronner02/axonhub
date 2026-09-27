@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
+	"strconv"
 	"testing"
 	"time"
 
@@ -35,6 +37,7 @@ type reasoningRecoveryExecutor struct {
 	alwaysFail        bool
 	errorBody         string
 	afterContentError bool
+	nestedRateLimit   bool
 	onCall            func()
 }
 
@@ -66,6 +69,13 @@ func (e *reasoningRecoveryExecutor) DoStream(ctx context.Context, request *httpc
 	response, err := e.Do(ctx, request)
 	if err != nil {
 		return nil, err
+	}
+	if e.nestedRateLimit {
+		return streams.SliceStream([]*httpclient.StreamEvent{
+			{Type: "response.created", Data: []byte(`{"type":"response.created","response":{"id":"resp_limit","object":"response","status":"in_progress","model":"gpt-6-astra","created_at":1700000000,"output":[]}}`)},
+			{Type: "error", Data: []byte(`{"type":"error","error":{"type":"too_many_requests","code":"rate_limit_exceeded","message":"fixture token rate limit exceeded"}}`)},
+			{Type: "response.failed", Data: []byte(`{"type":"response.failed","response":{"id":"resp_limit","object":"response","status":"failed","error":{"code":"rate_limit_exceeded","message":"fixture token rate limit exceeded"}}}`)},
+		}), nil
 	}
 	if e.afterContentError {
 		return streams.SliceStream([]*httpclient.StreamEvent{
@@ -458,4 +468,90 @@ func TestReasoningRecovery_StaysUsedAcrossChannelSwitch(t *testing.T) {
 	require.False(t, gjson.GetBytes(filtered.Body, `input.#(type=="reasoning")`).Exists())
 	outbound.reasoningRecovery.observeError(&httpclient.Error{StatusCode: 400, Body: []byte(`{"error":{"code":"invalid_encrypted_content"}}`)})
 	require.False(t, outbound.reasoningRecovery.pending)
+}
+
+func TestOpaqueResponses400Recovery_ChannelScopeAndOnceOnly(t *testing.T) {
+	const opaque = `{"error":{"type":"invalid_request_error","message":"bad response status code 400 (request id: fixture-request)"}}`
+	for _, tc := range []struct {
+		name                                   string
+		allow, alwaysFail, passThrough, stream bool
+		body                                   string
+		calls                                  int
+		wantError                              bool
+	}{
+		{name: "默认关闭", body: opaque, calls: 1, wantError: true},
+		{name: "显式启用非流式", allow: true, body: opaque, calls: 2},
+		{name: "显式启用转换流式", allow: true, stream: true, body: opaque, calls: 2},
+		{name: "显式启用透传流式", allow: true, passThrough: true, stream: true, body: opaque, calls: 2},
+		{name: "只允许一次恢复", allow: true, alwaysFail: true, body: opaque, calls: 2, wantError: true},
+		{name: "明确参数错误不恢复", allow: true, body: `{"error":{"type":"invalid_request_error","code":"invalid_parameter","message":"bad response status code 400 (request id: fixture-request)"}}`, calls: 1, wantError: true},
+		{name: "其他泛化错误不恢复", allow: true, body: `{"error":{"type":"invalid_request_error","message":"invalid codex request"}}`, calls: 1, wantError: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			executor := &reasoningRecoveryExecutor{alwaysFail: tc.alwaysFail, errorBody: tc.body}
+			ctx, client, processor, selected := newReasoningRecoveryOrchestrator(t, executor)
+			selected.Settings.PassThroughBody = lo.ToPtr(tc.passThrough)
+			if tc.allow {
+				processor.SystemService.CompatibilityConfig.ResponsesOpaque400RecoveryChannels = []string{strconv.Itoa(selected.ID)}
+			} else {
+				processor.SystemService.CompatibilityConfig.ResponsesOpaque400RecoveryChannels = []string{"other-channel"}
+			}
+			require.NoError(t, processor.SystemService.SetRetryPolicy(ctx, &biz.RetryPolicy{Enabled: true, MaxSingleChannelRetries: 3, LoadBalancerStrategy: biz.LoadBalancerStrategyAdaptive}))
+			request := recoveryHTTPRequest(t, tc.stream)
+			original := bytes.Clone(request.Body)
+			result, err := processor.Process(ctx, request)
+			if tc.wantError {
+				require.Error(t, err)
+			} else {
+				require.NoError(t, err)
+				if tc.stream {
+					_, err = streams.All(result.ChatCompletionStream)
+					require.NoError(t, err)
+					require.NoError(t, result.ChatCompletionStream.Close())
+				}
+			}
+			require.Len(t, executor.requests, tc.calls)
+			require.Equal(t, original, request.Body)
+			waitForRecoveryDrain(t, ctx, client, processor, selected)
+			if tc.calls == 2 {
+				require.True(t, gjson.GetBytes(executor.requests[0].Body, `input.#(type=="reasoning")`).Exists())
+				require.False(t, gjson.GetBytes(executor.requests[1].Body, `input.#(type=="reasoning")`).Exists())
+				for _, kind := range []string{"function_call", "function_call_output"} {
+					path := `input.#(type=="` + kind + `")`
+					require.JSONEq(t, gjson.GetBytes(executor.requests[0].Body, path).Raw, gjson.GetBytes(executor.requests[1].Body, path).Raw)
+				}
+			}
+			executions, err := client.RequestExecution.Query().Order(ent.Asc(requestexecution.FieldID)).All(ctx)
+			require.NoError(t, err)
+			require.Len(t, executions, tc.calls)
+			require.Equal(t, requestexecution.StatusFailed, executions[0].Status)
+			if !tc.wantError {
+				require.Equal(t, requestexecution.StatusCompleted, executions[len(executions)-1].Status)
+			}
+		})
+	}
+}
+
+func TestNestedResponsesRateLimit_IsPreservedAndSkipsSameChannelRetry(t *testing.T) {
+	executor := &reasoningRecoveryExecutor{acceptHistory: true, nestedRateLimit: true}
+	ctx, client, processor, selected := newReasoningRecoveryOrchestrator(t, executor)
+	selected.Settings.PassThroughBody = lo.ToPtr(false)
+	require.NoError(t, processor.SystemService.SetRetryPolicy(ctx, &biz.RetryPolicy{Enabled: true, MaxSingleChannelRetries: 3, EmptyResponseDetection: true, LoadBalancerStrategy: biz.LoadBalancerStrategyAdaptive}))
+	result, err := processor.Process(ctx, recoveryHTTPRequest(t, true))
+	if err == nil {
+		_, err = streams.All(result.ChatCompletionStream)
+		_ = result.ChatCompletionStream.Close()
+	}
+	var upstream *llm.ResponseError
+	require.True(t, errors.As(err, &upstream), "应保留上游协议错误: %v", err)
+	require.Equal(t, http.StatusTooManyRequests, upstream.StatusCode)
+	require.Equal(t, "rate_limit_exceeded", upstream.Detail.Code)
+	require.Len(t, executor.requests, 1, "限流后应切换渠道，不在同渠道继续重试")
+	waitForRecoveryDrain(t, ctx, client, processor, selected)
+	executions, err := client.RequestExecution.Query().All(ctx)
+	require.NoError(t, err)
+	require.Len(t, executions, 1)
+	require.Equal(t, requestexecution.StatusFailed, executions[0].Status)
+	require.Contains(t, executions[0].ErrorMessage, "rate_limit_exceeded")
+	require.Equal(t, http.StatusTooManyRequests, *executions[0].ResponseStatusCode)
 }

@@ -1189,6 +1189,10 @@ func (s *responsesInboundStream) emitStreamErrorEvent(err error) error {
 
 	if s.hasResponseCreated {
 		response := s.buildFailedResponse(code, message)
+		var upstream *llm.ResponseError
+		if errors.As(err, &upstream) && upstream.Detail.Type != "" {
+			response.Error.Type = upstream.Detail.Type
+		}
 		if err := s.enqueueEvent(&StreamEvent{
 			Type:     StreamEventTypeResponseFailed,
 			Response: response,
@@ -1229,6 +1233,17 @@ func classifyStreamError(err error) (code, message string) {
 	if errors.Is(err, context.DeadlineExceeded) {
 		code = "timeout"
 		message = "request timeout"
+		return code, message
+	}
+
+	var responseErr *llm.ResponseError
+	if errors.As(err, &responseErr) {
+		if responseErr.Detail.Code != "" {
+			code = responseErr.Detail.Code
+		}
+		if responseErr.Detail.Message != "" {
+			message = responseErr.Detail.Message
+		}
 		return code, message
 	}
 

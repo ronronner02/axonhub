@@ -215,6 +215,7 @@ func customizedDecodeHook(srcType reflect.Type, dstType reflect.Type, data any) 
 func setDefaults(v *viper.Viper) {
 	v.SetDefault("compatibility.invalid_encrypted_content_recovery", false)
 	v.SetDefault("compatibility.anthropic_stream_recovery_channels", []string{})
+	v.SetDefault("compatibility.responses_opaque_400_recovery_channels", []string{})
 
 	// Server defaults
 	v.SetDefault("server.host", "0.0.0.0")

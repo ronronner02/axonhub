@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 	"sync/atomic"
 	"time"
 
@@ -28,7 +29,8 @@ import (
 //
 //nolint:containedctx // Checked.
 type OutboundPersistentStream struct {
-	ctx context.Context
+	transformedErr atomic.Pointer[error]
+	ctx            context.Context
 
 	RequestService  *biz.RequestService
 	UsageLogService *biz.UsageLogService
@@ -96,6 +98,9 @@ func (ts *OutboundPersistentStream) Current() *httpclient.StreamEvent {
 }
 
 func (ts *OutboundPersistentStream) Err() error {
+	if err := ts.transformedErr.Load(); err != nil {
+		return *err
+	}
 	return ts.stream.Err()
 }
 
@@ -109,7 +114,7 @@ func (ts *OutboundPersistentStream) Close() error {
 
 	log.Debug(ctx, "Closing persistent stream", log.Int("chunk_count", len(ts.responseChunks)), log.Bool("received_done", ts.state.StreamCompleted))
 
-	streamErr := ts.stream.Err()
+	streamErr := ts.Err()
 	ctxErr := ctx.Err()
 
 	// If we received the [DONE] event, treat the stream as successfully completed
@@ -359,6 +364,12 @@ func (p *PersistentOutboundTransformer) APIFormat() llm.APIFormat {
 }
 
 func (p *PersistentOutboundTransformer) TransformError(ctx context.Context, rawErr *httpclient.Error) *llm.ResponseError {
+	p.reasoningRecovery.allowOpaque400 = false
+	if p.state != nil && p.state.CurrentCandidate != nil && p.state.CurrentCandidate.Channel != nil {
+		channel := p.state.CurrentCandidate.Channel
+		config := biz.CompatibilityConfig{ResponsesOpaque400RecoveryChannels: p.reasoningRecovery.opaque400Channels}
+		p.reasoningRecovery.allowOpaque400 = config.ResponsesOpaque400RecoveryEnabledFor(channel.ID, channel.Name)
+	}
 	p.reasoningRecovery.observeError(rawErr)
 	return p.wrapped.TransformError(ctx, rawErr)
 }
@@ -497,7 +508,13 @@ func (p *PersistentOutboundTransformer) TransformStream(ctx context.Context, req
 		p.state,
 	)
 
-	return p.wrapped.TransformStream(ctx, req, persistentStream)
+	transformed, err := p.wrapped.TransformStream(ctx, req, persistentStream)
+	if err != nil {
+		persistentStream.transformedErr.Store(&err)
+		_ = persistentStream.Close()
+		return nil, err
+	}
+	return &persistentResponseErrorStream{Stream: transformed, persistent: persistentStream}, nil
 }
 
 func (p *PersistentOutboundTransformer) AggregateStreamChunks(
@@ -646,7 +663,8 @@ func (p *PersistentOutboundTransformer) CanRetry(err error) bool {
 	// is tried immediately. The load balancer (e.g. ErrorAware strategy) will
 	// deprioritize this channel for subsequent requests and it will naturally
 	// recover as the rate-limit window resets.
-	if httpclient.IsRateLimitErr(err) {
+	var responseErr *llm.ResponseError
+	if httpclient.IsRateLimitErr(err) || (errors.As(err, &responseErr) && responseErr.StatusCode == http.StatusTooManyRequests) {
 		log.Debug(context.Background(), "429 rate limit, skipping same-channel retry to switch to next channel",
 			log.Int("channel_id", p.state.CurrentCandidate.Channel.ID),
 		)
@@ -680,7 +698,7 @@ func (p *PersistentOutboundTransformer) PrepareForRetry(ctx context.Context) err
 	if p.reasoningRecovery.pending {
 		p.reasoningRecovery.pending = false
 		p.reasoningRecovery.used = true
-		log.Info(ctx, "剥离失效 reasoning 历史后重试当前模型",
+		log.Info(ctx, "移除 reasoning 历史后执行一次兼容恢复",
 			log.Int("channel_id", candidate.Channel.ID),
 			log.String("model_id", p.GetCurrentModelID()),
 		)
@@ -768,4 +786,29 @@ func (p *PersistentOutboundTransformer) CustomizeExecutor(executor pipeline.Exec
 	}
 
 	return customizedExecutor
+}
+
+// 将转换器识别的协议错误同步到原始流的收尾记录；不缓存响应正文。
+type persistentResponseErrorStream struct {
+	streams.Stream[*llm.Response]
+	persistent *OutboundPersistentStream
+}
+
+func (s *persistentResponseErrorStream) Next() bool {
+	next := s.Stream.Next()
+	if !next {
+		s.captureError()
+	}
+	return next
+}
+
+func (s *persistentResponseErrorStream) captureError() {
+	if err := s.Stream.Err(); err != nil {
+		s.persistent.transformedErr.Store(&err)
+	}
+}
+
+func (s *persistentResponseErrorStream) Close() error {
+	s.captureError()
+	return s.Stream.Close()
 }
